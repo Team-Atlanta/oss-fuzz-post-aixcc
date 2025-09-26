@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+from pathlib import Path
 
 import constants
 import templates
@@ -348,6 +349,8 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
                                     action='store_false',
                                     help='do not clean existing artifacts '
                                     '(default).')
+  build_fuzzers_parser.add_argument('--crs',
+                                    help='build artifacts for CRS')
   build_fuzzers_parser.set_defaults(clean=False)
 
   fuzzbench_build_fuzzers_parser = subparsers.add_parser(
@@ -402,6 +405,8 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
   _add_external_project_args(run_fuzzer_parser)
   run_fuzzer_parser.add_argument(
       '--corpus-dir', help='directory to store corpus for the fuzz target')
+  run_fuzzer_parser.add_argument('--crs',
+                                 help='run CRS fuzzer')
   run_fuzzer_parser.add_argument('project',
                                  help='name of the project or path (external)')
   run_fuzzer_parser.add_argument('fuzzer_name', help='name of the fuzzer')
@@ -1003,6 +1008,25 @@ def build_fuzzers(args):
   else:
     # Generally, a fuzzer only needs one sanitized binary in the default dir.
     sanitized_binary_directories = ((args.sanitizer, ''),)
+
+  # CRS preparation for build
+  build_project_image=True
+  if args.crs:
+    crs_path = Path('crs') / args.crs
+    if not crs_path.is_dir():
+      logger.error(f'CRS {crs_path} does not exist')
+      return False
+    # build image for this CRS
+    tag = f'gcr.io/oss-fuzz/{args.project.name}'
+    build_image_impl(args.project)
+    # build tagged project image 
+    assert docker_build([
+      '--tag', tag, '--build-arg', f'parent_image={tag}', '--file',
+      str(crs_path / 'builder.Dockerfile'),
+      str(crs_path)
+    ])
+    build_project_image=False
+
   return all(
       build_fuzzers_impl(args.project,
                          args.clean,
@@ -1012,7 +1036,8 @@ def build_fuzzers(args):
                          args.e,
                          args.source_path,
                          mount_path=args.mount_path,
-                         child_dir=child_dir)
+                         child_dir=child_dir,
+                         build_project_image=build_project_image)
       for sanitizer, child_dir in sanitized_binary_directories)
 
 
@@ -1447,8 +1472,8 @@ def run_fuzzer(args):
   if not check_project_exists(args.project):
     return False
 
-  if not _check_fuzzer_exists(args.project, args.fuzzer_name,
-                              args.architecture):
+  if not args.crs and not _check_fuzzer_exists(args.project, args.fuzzer_name,
+                                               args.architecture):
     return False
 
   env = [
@@ -1460,6 +1485,10 @@ def run_fuzzer(args):
 
   if args.e:
     env += args.e
+
+  # debugging interface
+  # if args.crs:
+  #   env.append('FUZZER=' + args.fuzzer_name)
 
   run_args = _env_to_docker_args(env)
 
@@ -1474,13 +1503,37 @@ def run_fuzzer(args):
                                                    fuzzer=args.fuzzer_name)
     ])
 
+  # docker run volume mount
   run_args.extend([
-      '-v',
-      '%s:/out' % args.project.out,
-      '-t',
-      BASE_RUNNER_IMAGE,
+    '-v',
+    '%s:/out' % args.project.out,
+  ])
+
+  if args.crs:
+    crs_path = Path('crs') / args.crs
+    if not crs_path.is_dir():
+      logger.error(f'CRS {crs_path} does not exist')
+      return False
+    runner_tag = f'{args.crs}_runner'
+    assert docker_build([
+      '--tag', runner_tag,
+      '--file', str(crs_path / 'runner.Dockerfile'),
+      str(crs_path)
+    ])
+    # docker run image tag
+    run_args.extend([
+      '-t', runner_tag,
+    ])
+  else:
+    # docker run image tag and run_fuzzer command
+    run_args.extend([
+      '-t', BASE_RUNNER_IMAGE,
       'run_fuzzer',
-      args.fuzzer_name,
+    ])
+
+  # docker run fuzzer name and arguments, appended to command
+  run_args.extend([
+    args.fuzzer_name,
   ] + args.fuzzer_args)
 
   return docker_run(run_args, architecture=args.architecture)
