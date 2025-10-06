@@ -1,3 +1,0 @@
-[submodule "crs/atlantis-c-libafl"]
-	path = crs/atlantis-c-libafl
-	url = git@github.com:Team-Atlanta/atlantis-c-libafl.git
