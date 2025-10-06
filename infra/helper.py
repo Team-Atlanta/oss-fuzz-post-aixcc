@@ -31,7 +31,6 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
-from pathlib import Path
 
 import constants
 import templates
@@ -74,6 +73,7 @@ HTTPS_CORPUS_BACKUP_URL_FORMAT = (
 
 LANGUAGE_REGEX = re.compile(r'[^\s]+')
 PROJECT_LANGUAGE_REGEX = re.compile(r'\s*language\s*:\s*([^\s]+)')
+CRS_URL_REGEX = re.compile(r'\s*url\s*:\s*([^\s]+)')
 
 WORKDIR_REGEX = re.compile(r'\s*WORKDIR\s*([^\s]+)')
 
@@ -233,6 +233,10 @@ def main():  # pylint: disable=too-many-branches,too-many-return-statements
     result = fuzzbench_build_fuzzers(args)
   elif args.command == 'fuzzbench_run_fuzzer':
     result = fuzzbench_run_fuzzer(args)
+  elif args.command == 'build_crs':
+    result = build_crs(args)
+  elif args.command == 'run_crs':
+    result = run_crs(args)
   elif args.command == 'fuzzbench_measure':
     result = fuzzbench_measure(args)
   elif args.command == 'check_build':
@@ -349,8 +353,6 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
                                     action='store_false',
                                     help='do not clean existing artifacts '
                                     '(default).')
-  build_fuzzers_parser.add_argument('--crs',
-                                    help='build artifacts for CRS')
   build_fuzzers_parser.set_defaults(clean=False)
 
   fuzzbench_build_fuzzers_parser = subparsers.add_parser(
@@ -361,6 +363,32 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
   _add_environment_args(fuzzbench_build_fuzzers_parser)
   _add_external_project_args(fuzzbench_build_fuzzers_parser)
   fuzzbench_build_fuzzers_parser.add_argument('project')
+  build_crs_parser = subparsers.add_parser(
+      'build_crs', help='Build CRS for a project.')
+  _add_architecture_args(build_crs_parser)
+  _add_engine_args(build_crs_parser)
+  _add_sanitizer_args(build_crs_parser)
+  _add_environment_args(build_crs_parser)
+  _add_external_project_args(build_crs_parser)
+  build_crs_parser.add_argument('crs', help='name of the crs')
+  build_crs_parser.add_argument('project')
+  build_crs_parser.add_argument('source_path',
+                                help='path of local source',
+                                nargs='?')
+  build_crs_parser.add_argument('--mount_path',
+                                dest='mount_path',
+                                help='path to mount local source in '
+                                '(defaults to WORKDIR)')
+  build_crs_parser.add_argument('--clean',
+                                dest='clean',
+                                action='store_true',
+                                help='clean existing artifacts.')
+  build_crs_parser.add_argument('--no-clean',
+                                dest='clean',
+                                action='store_false',
+                                help='do not clean existing artifacts '
+                                '(default).')
+  build_crs_parser.set_defaults(clean=False)
   check_build_parser = subparsers.add_parser(
       'check_build', help='Checks that fuzzers execute without errors.')
   _add_architecture_args(check_build_parser)
@@ -405,8 +433,6 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
   _add_external_project_args(run_fuzzer_parser)
   run_fuzzer_parser.add_argument(
       '--corpus-dir', help='directory to store corpus for the fuzz target')
-  run_fuzzer_parser.add_argument('--crs',
-                                 help='run CRS fuzzer')
   run_fuzzer_parser.add_argument('project',
                                  help='name of the project or path (external)')
   run_fuzzer_parser.add_argument('fuzzer_name', help='name of the fuzzer')
@@ -436,6 +462,23 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
                                         help='name of the fuzzer')
   fuzzbench_measure_parser.add_argument('fuzz_target_name',
                                         help='name of the fuzzer')
+
+  run_crs_parser = subparsers.add_parser(
+    'run_crs', help='Run a CRS in the emulated fuzzing environment.')
+  _add_architecture_args(run_crs_parser)
+  _add_engine_args(run_crs_parser)
+  _add_sanitizer_args(run_crs_parser)
+  _add_environment_args(run_crs_parser)
+  _add_external_project_args(run_crs_parser)
+  run_crs_parser.add_argument(
+    '--corpus-dir', help='directory to store corpus for the fuzz target')
+  run_crs_parser.add_argument('crs', help='name of the crs')
+  run_crs_parser.add_argument('project',
+                              help='name of the project or path (external)')
+  run_crs_parser.add_argument('fuzzer_name', help='name of the fuzzer')
+  run_crs_parser.add_argument('fuzzer_args',
+                              help='arguments to pass to the fuzzer',
+                              nargs='*')
 
   coverage_parser = subparsers.add_parser(
       'coverage', help='Generate code coverage report for the project.')
@@ -1008,25 +1051,6 @@ def build_fuzzers(args):
   else:
     # Generally, a fuzzer only needs one sanitized binary in the default dir.
     sanitized_binary_directories = ((args.sanitizer, ''),)
-
-  # CRS preparation for build
-  build_project_image=True
-  if args.crs:
-    crs_path = Path('crs') / args.crs
-    if not crs_path.is_dir():
-      logger.error(f'CRS {crs_path} does not exist')
-      return False
-    # build image for this CRS
-    tag = f'gcr.io/oss-fuzz/{args.project.name}'
-    build_image_impl(args.project)
-    # build tagged project image 
-    assert docker_build([
-      '--tag', tag, '--build-arg', f'parent_image={tag}', '--file',
-      str(crs_path / 'builder.Dockerfile'),
-      str(crs_path)
-    ])
-    build_project_image=False
-
   return all(
       build_fuzzers_impl(args.project,
                          args.clean,
@@ -1036,8 +1060,7 @@ def build_fuzzers(args):
                          args.e,
                          args.source_path,
                          mount_path=args.mount_path,
-                         child_dir=child_dir,
-                         build_project_image=build_project_image)
+                         child_dir=child_dir)
       for sanitizer, child_dir in sanitized_binary_directories)
 
 
@@ -1079,6 +1102,80 @@ def fuzzbench_build_fuzzers(args):
                               mount_path=fuzzbench_path,
                               build_project_image=False)
 
+
+def pull_crs(tmp_dir, crs):
+  """Pull CRS repository"""
+  tmp_dir = os.path.abspath(tmp_dir)
+  crs_meta_path = os.path.join(tmp_dir, 'oss_crs')
+  crs_meta_url = "git@github.com:Team-Atlanta/oss-crs.git"
+  crs_path = os.path.join(tmp_dir, 'crs')
+  subprocess.run([
+      'git',
+      'clone',
+      crs_meta_url,
+      '--depth', '1',
+      crs_meta_path
+  ],
+                  check=True)
+
+  # CRS preparation for build
+  crs_meta_config_path = os.path.join(crs_meta_path, "crs", crs)
+  pkg_yaml = os.path.join(crs_meta_config_path, "pkg.yaml")
+  if not os.path.isdir(crs_meta_config_path):
+    logger.error(f'CRS {crs} does not exist')
+    return False
+
+  crs_url = None
+  with open(pkg_yaml) as file_handle:
+    content = file_handle.read()
+  for line in content.splitlines():
+    match_ = CRS_URL_REGEX.match(line)
+    if match_:
+      crs_url = match_.group(1)
+  if crs_url is None:
+    logger.error('Could not parse CRS url')
+    return False
+
+  subprocess.run([
+      'git',
+      'clone',
+      crs_url,
+      '--depth', '1',
+      '--recurse-submodules',
+      '--shallow-submodules',
+      crs_path
+  ],
+                  check=True)
+  return True
+  
+
+def build_crs(args):
+  """Builds fuzzers and artifacts for CRS"""
+  with tempfile.TemporaryDirectory() as tmp_dir:
+    if not pull_crs(tmp_dir, args.crs):
+      return False
+    crs_path = os.path.join(tmp_dir, 'crs')
+
+    # build image for this CRS
+    tag = f'gcr.io/oss-fuzz/{args.project.name}'
+    build_image_impl(args.project)
+    # build tagged project image
+    assert docker_build([
+      '--tag', tag, '--build-arg', f'parent_image={tag}', '--file',
+      os.path.join(crs_path, 'builder.Dockerfile'),
+      crs_path
+    ])
+
+    return build_fuzzers_impl(args.project,
+                              args.clean,
+                              args.engine,
+                              args.sanitizer,
+                              args.architecture,
+                              args.e,
+                              args.source_path,
+                              mount_path=args.mount_path,
+                              build_project_image=False)
+  
 
 def _add_oss_fuzz_ci_if_needed(env):
   """Adds value of |OSS_FUZZ_CI| environment variable to |env| if it is set."""
@@ -1472,8 +1569,8 @@ def run_fuzzer(args):
   if not check_project_exists(args.project):
     return False
 
-  if not args.crs and not _check_fuzzer_exists(args.project, args.fuzzer_name,
-                                               args.architecture):
+  if not _check_fuzzer_exists(args.project, args.fuzzer_name,
+                              args.architecture):
     return False
 
   env = [
@@ -1485,10 +1582,6 @@ def run_fuzzer(args):
 
   if args.e:
     env += args.e
-
-  # debugging interface
-  # if args.crs:
-  #   env.append('FUZZER=' + args.fuzzer_name)
 
   run_args = _env_to_docker_args(env)
 
@@ -1503,37 +1596,13 @@ def run_fuzzer(args):
                                                    fuzzer=args.fuzzer_name)
     ])
 
-  # docker run volume mount
   run_args.extend([
-    '-v',
-    '%s:/out' % args.project.out,
-  ])
-
-  if args.crs:
-    crs_path = Path('crs') / args.crs
-    if not crs_path.is_dir():
-      logger.error(f'CRS {crs_path} does not exist')
-      return False
-    runner_tag = f'{args.crs}_runner'
-    assert docker_build([
-      '--tag', runner_tag,
-      '--file', str(crs_path / 'runner.Dockerfile'),
-      str(crs_path)
-    ])
-    # docker run image tag
-    run_args.extend([
-      '-t', runner_tag,
-    ])
-  else:
-    # docker run image tag and run_fuzzer command
-    run_args.extend([
-      '-t', BASE_RUNNER_IMAGE,
+      '-v',
+      '%s:/out' % args.project.out,
+      '-t',
+      BASE_RUNNER_IMAGE,
       'run_fuzzer',
-    ])
-
-  # docker run fuzzer name and arguments, appended to command
-  run_args.extend([
-    args.fuzzer_name,
+      args.fuzzer_name,
   ] + args.fuzzer_args)
 
   return docker_run(run_args, architecture=args.architecture)
@@ -1593,6 +1662,66 @@ def fuzzbench_run_fuzzer(args):
 
     return docker_run(run_args, architecture=args.architecture)
 
+
+def run_crs(args):
+  """Runs CRS"""
+  if not check_project_exists(args.project):
+    return False
+
+  env = [
+      'FUZZING_ENGINE=' + args.engine,
+      'SANITIZER=' + args.sanitizer,
+      'RUN_FUZZER_MODE=interactive',
+      'HELPER=True',
+  ]
+
+  if args.e:
+    env += args.e
+
+  # debugging interface
+  # if args.crs:
+  #   env.append('FUZZER=' + args.fuzzer_name)
+
+  run_args = _env_to_docker_args(env)
+
+  if args.corpus_dir:
+    if not os.path.exists(args.corpus_dir):
+      logger.error('The path provided in --corpus-dir argument does not exist')
+      return False
+    corpus_dir = os.path.realpath(args.corpus_dir)
+    run_args.extend([
+        '-v',
+        '{corpus_dir}:/tmp/{fuzzer}_corpus'.format(corpus_dir=corpus_dir,
+                                                   fuzzer=args.fuzzer_name)
+    ])
+
+  # docker run volume mount
+  run_args.extend([
+    '-v',
+    '%s:/out' % args.project.out,
+  ])
+
+  with tempfile.TemporaryDirectory() as tmp_dir:
+    if not pull_crs(tmp_dir, args.crs):
+      return False
+    crs_path = os.path.join(tmp_dir, 'crs')
+    if not os.path.isdir(crs_path):
+      logger.error(f'CRS {crs_path} does not exist')
+      return False
+    runner_tag = f'{args.crs}_runner'
+    assert docker_build([
+      '--tag', runner_tag,
+      '--file', os.path.join(crs_path, 'runner.Dockerfile'),
+      crs_path
+    ])
+    # docker run image, fuzzer name and arguments, appended to command
+    run_args.extend([
+      '-t', runner_tag,
+      args.fuzzer_name,
+    ] + args.fuzzer_args)
+
+    return docker_run(run_args, architecture=args.architecture)
+  
 
 def fuzzbench_measure(args):
   """Measure results from fuzzing with fuzzbench."""
