@@ -74,6 +74,7 @@ HTTPS_CORPUS_BACKUP_URL_FORMAT = (
 LANGUAGE_REGEX = re.compile(r'[^\s]+')
 PROJECT_LANGUAGE_REGEX = re.compile(r'\s*language\s*:\s*([^\s]+)')
 CRS_URL_REGEX = re.compile(r'\s*url\s*:\s*([^\s]+)')
+CRS_REF_REGEX = re.compile(r'\s*ref\s*:\s*([^\s]+)')
 
 WORKDIR_REGEX = re.compile(r'\s*WORKDIR\s*([^\s]+)')
 
@@ -1114,9 +1115,8 @@ def pull_crs(tmp_dir, crs):
       'clone',
       crs_meta_url,
       '--depth', '1',
-      crs_meta_path
-  ],
-                  check=True)
+      crs_meta_path,
+  ], check=True)
 
   # CRS preparation for build
   crs_meta_config_path = os.path.join(crs_meta_path, "crs", crs)
@@ -1126,12 +1126,16 @@ def pull_crs(tmp_dir, crs):
     return False
 
   crs_url = None
+  crs_ref = None
   with open(pkg_yaml) as file_handle:
     content = file_handle.read()
   for line in content.splitlines():
-    match_ = CRS_URL_REGEX.match(line)
-    if match_:
-      crs_url = match_.group(1)
+    url_match_ = CRS_URL_REGEX.match(line)
+    if url_match_:
+      crs_url = url_match_.group(1)
+    ref_match_ = CRS_REF_REGEX.match(line)
+    if ref_match_:
+      crs_ref = ref_match_.group(1)
   if crs_url is None:
     logger.error('Could not parse CRS url')
     return False
@@ -1140,12 +1144,23 @@ def pull_crs(tmp_dir, crs):
       'git',
       'clone',
       crs_url,
-      '--depth', '1',
-      '--recurse-submodules',
-      '--shallow-submodules',
-      crs_path
-  ],
-                  check=True)
+      crs_path,
+  ], check=True)
+  if crs_ref is not None:
+    subprocess.run([
+        'git',
+        '-C', crs_path,
+        'checkout',
+        crs_ref,
+    ], check=True)
+    subprocess.run([
+        'git',
+        '-C', crs_path,
+        'submodule', 'update',
+        '--init',
+        '--recursive', 
+        '--depth', '1',
+    ], check=True)
   return True
   
 
