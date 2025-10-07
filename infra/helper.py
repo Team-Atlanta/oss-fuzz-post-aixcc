@@ -376,6 +376,8 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
   build_crs_parser.add_argument('source_path',
                                 help='path of local source',
                                 nargs='?')
+  build_crs_parser.add_argument('--local',
+                                help='path to local CRS source code')
   build_crs_parser.add_argument('--mount_path',
                                 dest='mount_path',
                                 help='path to mount local source in '
@@ -471,6 +473,8 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
   _add_sanitizer_args(run_crs_parser)
   _add_environment_args(run_crs_parser)
   _add_external_project_args(run_crs_parser)
+  run_crs_parser.add_argument('--local',
+                              help='path to local CRS source code')
   run_crs_parser.add_argument(
     '--corpus-dir', help='directory to store corpus for the fuzz target')
   run_crs_parser.add_argument('crs', help='name of the crs')
@@ -1167,9 +1171,12 @@ def pull_crs(tmp_dir, crs):
 def build_crs(args):
   """Builds fuzzers and artifacts for CRS"""
   with tempfile.TemporaryDirectory() as tmp_dir:
-    if not pull_crs(tmp_dir, args.crs):
-      return False
-    crs_path = os.path.join(tmp_dir, 'crs')
+    if args.local:
+      crs_path = args.local
+    else:
+      if not pull_crs(tmp_dir, args.crs):
+        return False
+      crs_path = os.path.join(tmp_dir, 'crs')
 
     # build image for this CRS
     tag = f'gcr.io/oss-fuzz/{args.project.name}'
@@ -1717,9 +1724,12 @@ def run_crs(args):
   ])
 
   with tempfile.TemporaryDirectory() as tmp_dir:
-    if not pull_crs(tmp_dir, args.crs):
-      return False
-    crs_path = os.path.join(tmp_dir, 'crs')
+    if args.local:
+      crs_path = args.local
+    else:
+      if not pull_crs(tmp_dir, args.crs):
+        return False
+      crs_path = os.path.join(tmp_dir, 'crs')
     if not os.path.isdir(crs_path):
       logger.error(f'CRS {crs_path} does not exist')
       return False
