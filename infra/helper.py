@@ -1112,7 +1112,7 @@ def pull_crs(tmp_dir, crs):
   """Pull CRS repository"""
   tmp_dir = os.path.abspath(tmp_dir)
   crs_meta_path = os.path.join(tmp_dir, 'oss_crs')
-  crs_meta_url = "git@github.com:Team-Atlanta/oss-crs.git"
+  crs_meta_url = "git@github.com:Team-Atlanta/oss-crs-registry.git"
   crs_path = os.path.join(tmp_dir, 'crs')
   subprocess.run([
       'git',
