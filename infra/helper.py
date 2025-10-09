@@ -1185,7 +1185,6 @@ def build_crs(args):
 
     build_env = [
       'CRS_TARGET=' + args.project.name,
-      'PROJECT_PATH=' + args.project.path,
     ]
     env = [
       'CRS_TARGET=' + args.project.name,
@@ -1200,6 +1199,7 @@ def build_crs(args):
     assert docker_build([
       '--tag', tag,
       '--build-arg', f'parent_image={tag}',
+      '--build-context', f'project={args.project.path}',
       *_env_to_docker_build_args(build_env),
       '--file', os.path.join(crs_path, 'builder.Dockerfile'),
       crs_path
@@ -1708,7 +1708,6 @@ def run_crs(args):
     return False
 
   build_env = [
-    'PROJECT_PATH=' + args.project.path,
     'CRS_TARGET=' + args.project.name,
   ]
   env = [
@@ -1759,6 +1758,7 @@ def run_crs(args):
     assert docker_build([
       '--tag', runner_tag,
       '--file', os.path.join(crs_path, 'runner.Dockerfile'),
+      '--build-context', f'project={args.project.path}',
       *_env_to_docker_build_args(build_env),
       crs_path
     ])
