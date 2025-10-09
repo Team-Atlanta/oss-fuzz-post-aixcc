@@ -1111,7 +1111,7 @@ def fuzzbench_build_fuzzers(args):
 def pull_crs(tmp_dir, crs):
   """Pull CRS repository"""
   tmp_dir = os.path.abspath(tmp_dir)
-  crs_meta_path = os.path.join(tmp_dir, 'oss_crs')
+  crs_meta_path = os.path.join(tmp_dir, 'oss-crs-registry')
   crs_meta_url = "git@github.com:Team-Atlanta/oss-crs-registry.git"
   crs_path = os.path.join(tmp_dir, 'crs')
   subprocess.run([
@@ -1188,12 +1188,18 @@ def build_crs(args):
       crs_path
     ])
 
+    env = [
+      'CRS_TARGET=' + args.project.name,
+    ]
+    if args.e:
+      env += args.e
+
     return build_fuzzers_impl(args.project,
                               args.clean,
                               args.engine,
                               args.sanitizer,
                               args.architecture,
-                              args.e,
+                              env,
                               args.source_path,
                               mount_path=args.mount_path,
                               build_project_image=False)
@@ -1695,6 +1701,7 @@ def run_crs(args):
       'SANITIZER=' + args.sanitizer,
       'RUN_FUZZER_MODE=interactive',
       'HELPER=True',
+      'CRS_TARGET=' + args.project.name,
   ]
 
   if args.e:
