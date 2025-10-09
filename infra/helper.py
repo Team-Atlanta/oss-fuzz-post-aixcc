@@ -770,6 +770,11 @@ def _env_to_docker_args(env_list):
   return sum([['-e', v] for v in env_list], [])
 
 
+def _env_to_docker_build_args(env_list):
+  """Turns envirnoment variable list into docker build arguments."""
+  return sum([['--build-arg', v] for v in env_list], [])
+
+
 def workdir_from_lines(lines, default='/src'):
   """Gets the WORKDIR from the given lines."""
   for line in reversed(lines):  # reversed to get last WORKDIR.
@@ -1178,21 +1183,27 @@ def build_crs(args):
         return False
       crs_path = os.path.join(tmp_dir, 'crs')
 
-    # build image for this CRS
-    tag = f'gcr.io/oss-fuzz/{args.project.name}'
-    build_image_impl(args.project)
-    # build tagged project image
-    assert docker_build([
-      '--tag', tag, '--build-arg', f'parent_image={tag}', '--file',
-      os.path.join(crs_path, 'builder.Dockerfile'),
-      crs_path
-    ])
-
+    build_env = [
+      'CRS_TARGET=' + args.project.name,
+      'PROJECT_PATH=' + args.project.path,
+    ]
     env = [
       'CRS_TARGET=' + args.project.name,
     ]
     if args.e:
       env += args.e
+
+    # build image for this CRS
+    tag = f'gcr.io/oss-fuzz/{args.project.name}'
+    build_image_impl(args.project)
+    # build tagged project image
+    assert docker_build([
+      '--tag', tag,
+      '--build-arg', f'parent_image={tag}',
+      *_env_to_docker_build_args(build_env),
+      '--file', os.path.join(crs_path, 'builder.Dockerfile'),
+      crs_path
+    ])
 
     return build_fuzzers_impl(args.project,
                               args.clean,
@@ -1696,6 +1707,10 @@ def run_crs(args):
   if not check_project_exists(args.project):
     return False
 
+  build_env = [
+    'PROJECT_PATH=' + args.project.path,
+    'CRS_TARGET=' + args.project.name,
+  ]
   env = [
       'FUZZING_ENGINE=' + args.engine,
       'SANITIZER=' + args.sanitizer,
@@ -1744,6 +1759,7 @@ def run_crs(args):
     assert docker_build([
       '--tag', runner_tag,
       '--file', os.path.join(crs_path, 'runner.Dockerfile'),
+      *_env_to_docker_build_args(build_env),
       crs_path
     ])
     # docker run image, fuzzer name and arguments, appended to command
