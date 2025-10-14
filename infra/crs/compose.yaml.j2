@@ -1,0 +1,108 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      - POSTGRES_USER=crs
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    ports: # TODO (for all ports), expose vs bind
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - crs_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crs -h localhost -p 5432"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  litellm:
+    # TODO pin version
+    image: ghcr.io/berriai/litellm-database:main-stable
+    container_name: litellm_proxy
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DATABASE_URL=postgresql://crs:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/crs
+    ports:
+      - "4000:4000"
+    volumes:
+      - {{ config_dir }}/config-litellm.yaml:/app/config.yaml:ro
+    networks:
+      - crs_network
+    command: --config /app/config.yaml --detailed_debug
+
+  key_provisioner:
+    build:
+      context: {{ oss_fuzz_path }}/infra/crs
+      dockerfile: key_provisioner.Dockerfile
+    container_name: key_provisioner
+    depends_on:
+      litellm:
+        condition: service_started
+    environment:
+      - LITELLM_URL=http://litellm:4000
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+    networks:
+      - crs_network
+    volumes:
+{%- for crs in crs_runners %}
+      - keys_data_{{ crs.name }}:/keys/{{ crs.name }}
+{%- endfor %}
+      - {{ config_dir }}:/config:ro
+    command: ["python", "key_provisioner.py", "--config-dir", "/config"]
+    # restart: on-failure:5
+
+{%- for crs in crs_runners %}
+
+  # CRS Container {{ loop.index }} - {{ crs.name }}
+  {{ crs.name }}_runner:
+    image: {{ crs.name }}_runner
+    container_name: {{ crs.name }}_{{ crs.suffix | default('runner') }}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+      key_provisioner:
+        condition: service_started
+    environment:
+      - LITELLM_URL=http://litellm:4000
+      - CPUSET_CPUS={{ crs.cpus }}
+      - MEMORY_LIMIT={{ crs.memory_limit | string }}
+    networks:
+      - crs_network
+    cpuset: {{ crs.cpus }}
+    build:
+      context: {{ crs_path }}
+      dockerfile: runner.Dockerfile
+      args:
+        - PROJECT_PATH={{ oss_fuzz_path }}/projects/{{ project }}
+    volumes:
+      # TODO corpus volume?
+      - {{ oss_fuzz_path }}/build/out/{{ project }}:/out
+      - keys_data_{{ crs.name }}:/keys:ro
+    deploy:
+      resources:
+        limits:
+          memory: {{ crs.memory_limit }}
+    command: {{ fuzzer_command | tojson }}
+{%- endfor %}
+
+networks:
+  crs_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: postgres_data
+{%- for crs in crs_runners %}
+  keys_data_{{ crs.name }}:
+    name: keys_data_{{ crs.name }}
+{%- endfor %}

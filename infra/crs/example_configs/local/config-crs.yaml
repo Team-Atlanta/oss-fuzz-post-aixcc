@@ -1,0 +1,4 @@
+atlantis-c:
+  models:
+    - gpt-4o-mini
+  ncpu: 1-all
