@@ -22,6 +22,7 @@ from multiprocessing.dummy import Pool as ThreadPool
 import argparse
 import datetime
 import errno
+import glob
 import logging
 import os
 import re
@@ -477,6 +478,11 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
                               help='path to local CRS source code')
   run_crs_parser.add_argument(
     '--corpus-dir', help='directory to store corpus for the fuzz target')
+  run_crs_parser.add_argument('--config-dir',
+                              help='directory containing CRS configuration files '
+                              '(config-resource.yaml, config-worker.yaml, config-crs.yaml)')
+  run_crs_parser.add_argument('--env-file',
+                              help='path to environment file for compose')
   run_crs_parser.add_argument('crs', help='name of the crs')
   run_crs_parser.add_argument('project',
                               help='name of the project or path (external)')
@@ -1185,6 +1191,7 @@ def build_crs(args):
 
     build_env = [
       'CRS_TARGET=' + args.project.name,
+      'PROJECT_PATH=' + args.project.path,
     ]
     env = [
       'CRS_TARGET=' + args.project.name,
@@ -1703,72 +1710,135 @@ def fuzzbench_run_fuzzer(args):
 
 
 def run_crs(args):
-  """Runs CRS"""
+  """Runs CRS using docker-compose with render_compose.py"""
   if not check_project_exists(args.project):
     return False
 
-  build_env = [
-    'CRS_TARGET=' + args.project.name,
-  ]
-  env = [
-      'FUZZING_ENGINE=' + args.engine,
-      'SANITIZER=' + args.sanitizer,
-      'RUN_FUZZER_MODE=interactive',
-      'HELPER=True',
-      'CRS_TARGET=' + args.project.name,
-  ]
+  # Check if config-dir is provided for compose mode
+  if args.config_dir:
+    # Use compose generation approach
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      if args.local:
+        crs_path = args.local
+      else:
+        if not pull_crs(tmp_dir, args.crs):
+          return False
+        crs_path = os.path.join(tmp_dir, 'crs')
 
-  if args.e:
-    env += args.e
-
-  # debugging interface
-  # if args.crs:
-  #   env.append('FUZZER=' + args.fuzzer_name)
-
-  run_args = _env_to_docker_args(env)
-
-  if args.corpus_dir:
-    if not os.path.exists(args.corpus_dir):
-      logger.error('The path provided in --corpus-dir argument does not exist')
-      return False
-    corpus_dir = os.path.realpath(args.corpus_dir)
-    run_args.extend([
-        '-v',
-        '{corpus_dir}:/tmp/{fuzzer}_corpus'.format(corpus_dir=corpus_dir,
-                                                   fuzzer=args.fuzzer_name)
-    ])
-
-  # docker run volume mount
-  run_args.extend([
-    '-v',
-    '%s:/out' % args.project.out,
-  ])
-
-  with tempfile.TemporaryDirectory() as tmp_dir:
-    if args.local:
-      crs_path = args.local
-    else:
-      if not pull_crs(tmp_dir, args.crs):
+      if not os.path.isdir(crs_path):
+        logger.error(f'CRS {crs_path} does not exist')
         return False
-      crs_path = os.path.join(tmp_dir, 'crs')
-    if not os.path.isdir(crs_path):
-      logger.error(f'CRS {crs_path} does not exist')
-      return False
-    runner_tag = f'{args.crs}_runner'
-    assert docker_build([
-      '--tag', runner_tag,
-      '--file', os.path.join(crs_path, 'runner.Dockerfile'),
-      '--build-context', f'project={args.project.path}',
-      *_env_to_docker_build_args(build_env),
-      crs_path
-    ])
-    # docker run image, fuzzer name and arguments, appended to command
-    run_args.extend([
-      '-t', runner_tag,
-      args.fuzzer_name,
-    ] + args.fuzzer_args)
 
-    return docker_run(run_args, architecture=args.architecture)
+      # Path to render_compose.py
+      render_compose_script = os.path.join(OSS_FUZZ_DIR, 'infra', 'crs', 'render_compose.py')
+
+      # Build command for render_compose.py
+      # FIXME figure out the packaging, and this call is ugly
+      render_cmd = [
+        'python3',
+        render_compose_script,
+        '--config-dir', args.config_dir,
+        '--output-dir', tmp_dir,
+        '--crs-path', crs_path,
+        '--project', args.project.name,
+      ]
+
+      if args.env_file:
+        render_cmd.extend(['--env-file', args.env_file])
+
+      # Add fuzzer_name and fuzzer_args at the end
+      render_cmd.append(args.fuzzer_name)
+      render_cmd.extend(args.fuzzer_args)
+
+      logger.info('Generating compose files: %s', _get_command_string(render_cmd))
+      try:
+        subprocess.check_call(render_cmd)
+      except subprocess.CalledProcessError:
+        logger.error('Failed to generate compose files')
+        return False
+
+      # Find generated compose files
+      compose_pattern = os.path.join(tmp_dir, 'compose-*.yaml')
+      compose_files = glob.glob(compose_pattern)
+      if not compose_files:
+        logger.error('No compose files were generated')
+        return False
+
+      logger.info('Found %d compose file(s)', len(compose_files))
+
+      # Run docker-compose up for each generated file
+      # TODO: Consider running all compose files together or in parallel
+      for compose_file in compose_files:
+        logger.info('Starting services from: %s', compose_file)
+        compose_cmd = ['docker-compose', '-f', compose_file, 'up', '--abort-on-container-exit']
+        try:
+          subprocess.check_call(compose_cmd)
+        except subprocess.CalledProcessError:
+          logger.error('Docker compose failed for: %s', compose_file)
+          return False
+
+      return True
+
+  else:
+    # Original implementation for backward compatibility
+    build_env = [
+      'CRS_TARGET=' + args.project.name,
+    ]
+    env = [
+        'FUZZING_ENGINE=' + args.engine,
+        'SANITIZER=' + args.sanitizer,
+        'RUN_FUZZER_MODE=interactive',
+        'HELPER=True',
+        'CRS_TARGET=' + args.project.name,
+    ]
+
+    if args.e:
+      env += args.e
+
+    run_args = _env_to_docker_args(env)
+
+    if args.corpus_dir:
+      if not os.path.exists(args.corpus_dir):
+        logger.error('The path provided in --corpus-dir argument does not exist')
+        return False
+      corpus_dir = os.path.realpath(args.corpus_dir)
+      run_args.extend([
+          '-v',
+          '{corpus_dir}:/tmp/{fuzzer}_corpus'.format(corpus_dir=corpus_dir,
+                                                     fuzzer=args.fuzzer_name)
+      ])
+
+    # docker run volume mount
+    run_args.extend([
+      '-v',
+      '%s:/out' % args.project.out,
+    ])
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      if args.local:
+        crs_path = args.local
+      else:
+        if not pull_crs(tmp_dir, args.crs):
+          return False
+        crs_path = os.path.join(tmp_dir, 'crs')
+      if not os.path.isdir(crs_path):
+        logger.error(f'CRS {crs_path} does not exist')
+        return False
+      runner_tag = f'{args.crs}_runner'
+      assert docker_build([
+        '--tag', runner_tag,
+        '--file', os.path.join(crs_path, 'runner.Dockerfile'),
+        '--build-context', f'project={args.project.path}',
+        *_env_to_docker_build_args(build_env),
+        crs_path
+      ])
+      # docker run image, fuzzer name and arguments, appended to command
+      run_args.extend([
+        '-t', runner_tag,
+        args.fuzzer_name,
+      ] + args.fuzzer_args)
+
+      return docker_run(run_args, architecture=args.architecture)
   
 
 def fuzzbench_measure(args):
