@@ -12,6 +12,7 @@ Example usage:
 
 import argparse
 import shutil
+import sys
 import yaml
 from pathlib import Path
 from jinja2 import Template
@@ -49,14 +50,101 @@ def load_config(config_dir: Path) -> Dict[str, Any]:
   return config
 
 
+def parse_cpu_range(cpu_spec: str) -> List[int]:
+  """
+  Parse CPU specification in format 'm-n' and return list of CPU cores.
+
+  Args:
+    cpu_spec: CPU specification string (e.g., '0-7', '4-11')
+
+  Returns:
+    List of CPU core numbers
+  """
+  if '-' in cpu_spec:
+    start, end = cpu_spec.split('-', 1)
+    return list(range(int(start), int(end) + 1))
+  else:
+    # Single core specified
+    return [int(cpu_spec)]
+
+
+def format_cpu_list(cpu_list: List[int]) -> str:
+  """
+  Format a list of CPU cores as comma-separated string.
+
+  Args:
+    cpu_list: List of CPU core numbers
+
+  Returns:
+    Comma-separated string (e.g., '0,1,2,3')
+  """
+  return ','.join(map(str, cpu_list))
+
+
+def parse_memory_mb(memory_spec: str) -> int:
+  """
+  Parse memory specification and return value in MB.
+
+  Args:
+    memory_spec: Memory specification (e.g., '4G', '512M', '1024')
+
+  Returns:
+    Memory in megabytes
+  """
+  memory_spec = memory_spec.strip().upper()
+  if memory_spec.endswith('G'):
+    return int(memory_spec[:-1]) * 1024
+  elif memory_spec.endswith('M'):
+    return int(memory_spec[:-1])
+  else:
+    # Assume MB if no unit specified
+    return int(memory_spec)
+
+
+def format_memory(memory_mb: int) -> str:
+  """
+  Format memory in MB back to string with appropriate unit.
+
+  Args:
+    memory_mb: Memory in megabytes
+
+  Returns:
+    Formatted string (e.g., '4G', '512M')
+  """
+  if memory_mb >= 1024 and memory_mb % 1024 == 0:
+    return f"{memory_mb // 1024}G"
+  else:
+    return f"{memory_mb}M"
+
+
 def get_crs_for_worker(worker_name: str, resource_config: Dict[str, Any]) -> List[Dict[str, Any]]:
   """
   Extract CRS configurations for a specific worker.
 
+  Supports three configuration modes:
+  1. Fine-grained: Each CRS explicitly specifies resources per worker
+  2. Global: CRS specifies global resources applied to all workers
+  3. Auto-division: No CRS resources specified, divide worker resources evenly
+
   Returns a list of CRS configurations with resource constraints applied.
+  Exits with error if:
+  - CPU cores conflict (two CRS trying to use same core)
+  - CPU cores out of worker range
+  - Not enough cores to give each CRS at least one
   """
-  crs_list = []
   crs_configs = resource_config.get('crs', {})
+  workers_config = resource_config.get('workers', {})
+  worker_resources = workers_config.get(worker_name, {})
+
+  # Get worker's available resources
+  worker_cpus_spec = worker_resources.get('cpuset', '0-3')
+  worker_memory_spec = worker_resources.get('memory', '4G')
+  worker_all_cpus = set(parse_cpu_range(worker_cpus_spec))
+  worker_total_memory_mb = parse_memory_mb(worker_memory_spec)
+
+  # Collect CRS instances for this worker and categorize by config type
+  explicit_crs = []  # CRS with explicit resource config for this worker
+  auto_divide_crs = []  # CRS without explicit config (needs auto-division)
 
   for crs_name, crs_config in crs_configs.items():
     # Check if this CRS should run on this worker
@@ -64,38 +152,116 @@ def get_crs_for_worker(worker_name: str, resource_config: Dict[str, Any]) -> Lis
     if worker_name not in crs_workers:
       continue
 
-    # Get resource configuration for this CRS on this worker
+    # Check for explicit resource configuration
     resources = crs_config.get('resources', {})
 
-    # Determine CPUs and memory for this worker
-    if isinstance(resources, dict):
-      # Check if resources are per-worker or global
-      if worker_name in resources:
-        # Per-worker resource specification
-        worker_resources = resources[worker_name]
-        cpus = worker_resources.get('cpus', '0-3')
-        memory = worker_resources.get('memory', '4G')
-      elif 'cpus' in resources:
-        # Global resource specification (same for all workers)
-        cpus = resources.get('cpus', '0-3')
-        memory = resources.get('memory', '4G')
-      else:
-        # No resources specified, use defaults
-        cpus = '0-3'
-        memory = '4G'
-    else:
-      # No resources specified
-      cpus = '0-3'
-      memory = '4G'
+    # Three cases for resources config:
+    # 1. resources.{worker_name} exists - per-worker config
+    # 2. resources.cpus exists (no worker key) - global config for all workers
+    # 3. resources is empty or only has other workers - auto-divide
 
-    crs_list.append({
+    if isinstance(resources, dict) and worker_name in resources:
+      # Case 1: Per-worker explicit config
+      explicit_crs.append((crs_name, resources[worker_name]))
+    elif isinstance(resources, dict) and 'cpuset' in resources and worker_name not in resources:
+      # Case 2: Global config (applies to all workers)
+      explicit_crs.append((crs_name, resources))
+    else:
+      # Case 3: No explicit config for this worker - needs auto-division
+      auto_divide_crs.append(crs_name)
+
+  if not explicit_crs and not auto_divide_crs:
+    return []
+
+  # Track used CPUs and memory for conflict detection
+  used_cpus = set()
+  used_memory_mb = 0
+  result = []
+
+  # Process explicit configurations first
+  for crs_name, crs_resources in explicit_crs:
+    cpus_spec = crs_resources.get('cpuset', '0-3')
+    memory_spec = crs_resources.get('memory', '4G')
+
+    crs_cpus_list = parse_cpu_range(cpus_spec)
+    crs_cpus_set = set(crs_cpus_list)
+    crs_memory_mb = parse_memory_mb(memory_spec)
+
+    # Validation: Check CPUs are within worker range
+    if not crs_cpus_set.issubset(worker_all_cpus):
+      out_of_range = crs_cpus_set - worker_all_cpus
+      print(f"ERROR: CRS '{crs_name}' on worker '{worker_name}' uses CPUs {out_of_range} "
+            f"which are outside worker's CPU range {worker_cpus_spec}")
+      sys.exit(1)
+
+    # Validation: Check for CPU conflicts
+    conflicts = used_cpus & crs_cpus_set
+    if conflicts:
+      print(f"ERROR: CRS '{crs_name}' on worker '{worker_name}' conflicts with another CRS. "
+            f"CPUs {conflicts} are already allocated.")
+      sys.exit(1)
+
+    used_cpus.update(crs_cpus_set)
+    used_memory_mb += crs_memory_mb
+
+    result.append({
       'name': crs_name,
-      'cpus': cpus,
-      'memory_limit': str(memory),
+      'cpus': format_cpu_list(crs_cpus_list),
+      'memory_limit': format_memory(crs_memory_mb),
       'suffix': 'runner'
     })
 
-  return crs_list
+  # Process auto-divide CRS instances
+  if auto_divide_crs:
+    # Calculate remaining resources
+    remaining_cpus = sorted(worker_all_cpus - used_cpus)
+    remaining_memory_mb = worker_total_memory_mb - used_memory_mb
+
+    num_auto = len(auto_divide_crs)
+
+    # Validation: Check we have enough CPUs
+    if len(remaining_cpus) < num_auto:
+      print(f"ERROR: Not enough CPUs on worker '{worker_name}' for auto-division. "
+            f"Need at least {num_auto} cores for {num_auto} CRS instances, "
+            f"but only {len(remaining_cpus)} cores remain after explicit allocations.")
+      sys.exit(1)
+
+    # Validation: Check we have enough memory
+    if remaining_memory_mb < num_auto * 512:  # Minimum 512MB per CRS
+      print(f"ERROR: Not enough memory on worker '{worker_name}' for auto-division. "
+            f"Only {remaining_memory_mb}MB remain for {num_auto} CRS instances "
+            f"(minimum 512MB per CRS required).")
+      sys.exit(1)
+
+    # Divide remaining resources
+    cpus_per_crs = len(remaining_cpus) // num_auto
+    memory_per_crs = remaining_memory_mb // num_auto
+
+    for idx, crs_name in enumerate(auto_divide_crs):
+      # Allocate CPU cores
+      start_idx = idx * cpus_per_crs
+      end_idx = start_idx + cpus_per_crs
+      if idx == num_auto - 1:
+        # Last CRS gets remaining cores
+        end_idx = len(remaining_cpus)
+
+      crs_cpus_list = remaining_cpus[start_idx:end_idx]
+
+      # Allocate memory
+      if idx == num_auto - 1:
+        # Last CRS gets remaining memory
+        crs_memory = remaining_memory_mb - (memory_per_crs * (num_auto - 1))
+      else:
+        crs_memory = memory_per_crs
+
+      result.append({
+        'name': crs_name,
+        'cpuset': format_cpu_list(crs_cpus_list),
+        'memory_limit': format_memory(crs_memory),
+        'suffix': 'runner'
+      })
+
+  return result
 
 
 def render_compose_for_worker(worker_name: str, crs_list: List[Dict[str, Any]],
@@ -225,7 +391,7 @@ def main():
 
     print(f"  Found {len(crs_list)} CRS instance(s):")
     for crs in crs_list:
-      print(f"    - {crs['name']}: CPUs={crs['cpus']}, Memory={crs['memory_limit']}")
+      print(f"    - {crs['name']}: CPUs={crs['cpuset']}, Memory={crs['memory_limit']}")
 
     # Render compose file
     try:

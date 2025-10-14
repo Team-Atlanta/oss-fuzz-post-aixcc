@@ -74,11 +74,11 @@ services:
         condition: service_started
     environment:
       - LITELLM_URL=http://litellm:4000
-      - CPUSET_CPUS={{ crs.cpus }}
+      - CPUSET_CPUS={{ crs.cpuset }}
       - MEMORY_LIMIT={{ crs.memory_limit | string }}
     networks:
       - crs_network
-    cpuset: {{ crs.cpus }}
+    cpuset: {{ crs.cpuset }}
     build:
       context: {{ crs_path }}
       dockerfile: runner.Dockerfile
