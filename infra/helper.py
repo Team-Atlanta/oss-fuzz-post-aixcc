@@ -77,8 +77,6 @@ HTTPS_CORPUS_BACKUP_URL_FORMAT = (
 
 LANGUAGE_REGEX = re.compile(r'[^\s]+')
 PROJECT_LANGUAGE_REGEX = re.compile(r'\s*language\s*:\s*([^\s]+)')
-CRS_URL_REGEX = re.compile(r'\s*url\s*:\s*([^\s]+)')
-CRS_REF_REGEX = re.compile(r'\s*ref\s*:\s*([^\s]+)')
 
 WORKDIR_REGEX = re.compile(r'\s*WORKDIR\s*([^\s]+)')
 
@@ -375,11 +373,10 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
   _add_sanitizer_args(build_crs_parser)
   _add_environment_args(build_crs_parser)
   _add_external_project_args(build_crs_parser)
-  build_crs_parser.add_argument('project')
-  build_crs_parser.add_argument('--config-dir',
-                                required=True,
+  build_crs_parser.add_argument('config_dir',
                                 help='directory containing CRS configuration files '
                                 '(config-resource.yaml, config-worker.yaml, config-crs.yaml, .env)')
+  build_crs_parser.add_argument('project')
   check_build_parser = subparsers.add_parser(
       'check_build', help='Checks that fuzzers execute without errors.')
   _add_architecture_args(check_build_parser)
@@ -461,16 +458,15 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
   _add_sanitizer_args(run_crs_parser)
   _add_environment_args(run_crs_parser)
   _add_external_project_args(run_crs_parser)
+  run_crs_parser.add_argument('config_dir',
+                              help='directory containing CRS configuration files '
+                              '(config-resource.yaml, config-worker.yaml, config-crs.yaml, .env)')
   run_crs_parser.add_argument('project',
                               help='name of the project or path (external)')
   run_crs_parser.add_argument('fuzzer_name', help='name of the fuzzer')
   run_crs_parser.add_argument('fuzzer_args',
                               help='arguments to pass to the fuzzer',
                               nargs='*')
-  run_crs_parser.add_argument('--config-dir',
-                              required=True,
-                              help='directory containing CRS configuration files '
-                              '(config-resource.yaml, config-worker.yaml, config-crs.yaml, .env)')
   run_crs_parser.add_argument('--worker',
                               default='local',
                               help='worker name to run CRS on')
@@ -1131,66 +1127,6 @@ def fuzzbench_build_fuzzers(args):
                               mount_path=fuzzbench_path,
                               build_project_image=False)
 
-
-def pull_crs(tmp_dir, crs):
-  """Pull CRS repository"""
-  tmp_dir = os.path.abspath(tmp_dir)
-  crs_meta_path = os.path.join(tmp_dir, 'oss-crs-registry')
-  crs_meta_url = "git@github.com:Team-Atlanta/oss-crs-registry.git"
-  crs_path = os.path.join(tmp_dir, 'crs')
-  subprocess.run([
-      'git',
-      'clone',
-      crs_meta_url,
-      '--depth', '1',
-      crs_meta_path,
-  ], check=True)
-
-  # CRS preparation for build
-  crs_meta_config_path = os.path.join(crs_meta_path, "crs", crs)
-  pkg_yaml = os.path.join(crs_meta_config_path, "pkg.yaml")
-  if not os.path.isdir(crs_meta_config_path):
-    logger.error(f'CRS {crs} does not exist')
-    return False
-
-  crs_url = None
-  crs_ref = None
-  with open(pkg_yaml) as file_handle:
-    content = file_handle.read()
-  for line in content.splitlines():
-    url_match_ = CRS_URL_REGEX.match(line)
-    if url_match_:
-      crs_url = url_match_.group(1)
-    ref_match_ = CRS_REF_REGEX.match(line)
-    if ref_match_:
-      crs_ref = ref_match_.group(1)
-  if crs_url is None:
-    logger.error('Could not parse CRS url')
-    return False
-
-  subprocess.run([
-      'git',
-      'clone',
-      crs_url,
-      crs_path,
-  ], check=True)
-  if crs_ref is not None:
-    subprocess.run([
-        'git',
-        '-C', crs_path,
-        'checkout',
-        crs_ref,
-    ], check=True)
-    subprocess.run([
-        'git',
-        '-C', crs_path,
-        'submodule', 'update',
-        '--init',
-        '--recursive', 
-        '--depth', '1',
-    ], check=True)
-  return True
-  
 
 def build_crs(args):
   """Builds fuzzers and artifacts for CRS using docker compose"""
