@@ -41,7 +41,3 @@ networks:
 volumes:
   {{ config_hash }}_postgres_data:
     name: {{ config_hash }}_postgres_data
-{%- for crs in crs_list %}
-  {{ config_hash }}_keys_data_{{ crs.name }}:
-    name: {{ config_hash }}_keys_data_{{ crs.name }}
-{%- endfor %}

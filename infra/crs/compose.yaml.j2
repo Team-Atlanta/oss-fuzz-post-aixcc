@@ -92,6 +92,5 @@ networks:
 volumes:
 {%- for crs in crs_list %}
   {{ config_hash }}_keys_data_{{ crs.name }}:
-    external: true
     name: {{ config_hash }}_keys_data_{{ crs.name }}
 {%- endfor %}
