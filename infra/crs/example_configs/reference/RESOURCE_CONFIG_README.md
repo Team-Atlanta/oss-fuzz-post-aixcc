@@ -96,7 +96,7 @@ Configure individual CRS instances:
 
 ```yaml
 crs:
-  atlantis-c:
+  atlantis-c-libafl:
     workers:
       - local
 ```
@@ -109,7 +109,7 @@ crs:
 
 ```yaml
 crs:
-  atlantis-c:
+  atlantis-c-libafl:
     workers:
       - local
     resources:
@@ -125,7 +125,7 @@ crs:
 
 ```yaml
 crs:
-  atlantis-c:
+  atlantis-c-libafl:
     workers:
       - local
       - server1
@@ -146,7 +146,7 @@ crs:
 
 ```yaml
 crs:
-  atlantis-c:
+  atlantis-c-libafl:
     workers:
       - local
     resources:
@@ -191,7 +191,7 @@ When you specify LLM resources for a specific CRS:
 
 ```yaml
 crs:
-  atlantis-c:
+  atlantis-c-libafl:
     llm:
       max_budget: 30  # This CRS gets $30 of global budget
 ```
@@ -384,7 +384,7 @@ all:
   llm:
     quota: 100
 
-atlantis-c:
+atlantis-c-libafl:
   cpu: 4
   ram: 4G
 ```
@@ -402,7 +402,7 @@ llm:
   max_tpm: 100000
 
 crs:
-  atlantis-c:
+  atlantis-c-libafl:
     workers: [local]
     resources:
       cpu: 4

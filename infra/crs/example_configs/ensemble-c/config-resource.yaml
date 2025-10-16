@@ -27,3 +27,11 @@ crs:
     # Worker placement - CRS will be deployed to these workers
     workers:
       - local
+    # Take all of the budget
+    llm:
+      max_budget: 10
+
+  crs-libfuzzer:
+    workers:
+      - local
+    # LLM budget should be zero

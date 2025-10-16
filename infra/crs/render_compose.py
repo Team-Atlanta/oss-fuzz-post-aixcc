@@ -11,7 +11,9 @@ Example usage:
 """
 
 import argparse
+import logging
 import shutil
+import subprocess
 import sys
 import yaml
 from pathlib import Path
@@ -19,6 +21,9 @@ from jinja2 import Template
 from typing import Dict, Any, List
 
 SCRIPT_DIR = Path(__file__).parent
+
+# Configure logging (INFO level won't show by default)
+logging.basicConfig(level=logging.WARNING, format='%(message)s')
 
 def load_config(config_dir: Path) -> Dict[str, Any]:
   """Load all configuration files from the config directory."""
@@ -117,7 +122,72 @@ def format_memory(memory_mb: int) -> str:
     return f"{memory_mb}M"
 
 
-def get_crs_for_worker(worker_name: str, resource_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+def clone_crs_if_needed(crs_name: str, registry_parent_dir: Path) -> bool:
+  """
+  Clone a CRS repository if it doesn't already exist.
+
+  Args:
+    crs_name: Name of the CRS to clone
+    registry_parent_dir: Parent directory containing oss-crs-registry and CRS repos
+
+  Returns:
+    True if successful, False otherwise
+  """
+  crs_path = registry_parent_dir / crs_name
+
+  if crs_path.exists():
+    logging.info(f"CRS '{crs_name}' already exists at {crs_path}")
+    return True
+
+  # Parse oss-crs-registry to get CRS URL and ref
+  oss_crs_registry_path = registry_parent_dir / "oss-crs-registry"
+  crs_meta_path = oss_crs_registry_path / "crs" / crs_name / "pkg.yaml"
+
+  if not crs_meta_path.exists():
+    print(f"ERROR: CRS metadata not found for '{crs_name}' at {crs_meta_path}")
+    return False
+
+  # Parse pkg.yaml to get URL and ref
+  import re
+  url_regex = re.compile(r'\s*url\s*:\s*([^\s]+)')
+  ref_regex = re.compile(r'\s*ref\s*:\s*([^\s]+)')
+
+  crs_url = None
+  crs_ref = None
+
+  with open(crs_meta_path) as f:
+    for line in f:
+      url_match = url_regex.match(line)
+      if url_match:
+        crs_url = url_match.group(1)
+      ref_match = ref_regex.match(line)
+      if ref_match:
+        crs_ref = ref_match.group(1)
+
+  if not crs_url:
+    print(f"ERROR: Could not parse CRS URL from {crs_meta_path}")
+    return False
+
+  # Clone the CRS repository
+  logging.info(f"Cloning CRS '{crs_name}' from {crs_url}")
+  try:
+    subprocess.check_call(['git', 'clone', crs_url, str(crs_path)], stdout=subprocess.DEVNULL)
+
+    if crs_ref:
+      subprocess.check_call(['git', '-C', str(crs_path), 'checkout', crs_ref], stdout=subprocess.DEVNULL)
+      subprocess.check_call(['git', '-C', str(crs_path), 'submodule', 'update',
+                             '--init', '--recursive', '--depth', '1'], stdout=subprocess.DEVNULL)
+
+    logging.info(f"Successfully cloned CRS '{crs_name}' to {crs_path}")
+    return True
+
+  except subprocess.CalledProcessError as e:
+    print(f"ERROR: Failed to clone CRS '{crs_name}': {e}")
+    return False
+
+
+def get_crs_for_worker(worker_name: str, resource_config: Dict[str, Any],
+                       registry_parent_dir: Path) -> List[Dict[str, Any]]:
   """
   Extract CRS configurations for a specific worker.
 
@@ -127,6 +197,8 @@ def get_crs_for_worker(worker_name: str, resource_config: Dict[str, Any]) -> Lis
   3. Auto-division: No CRS resources specified, divide worker resources evenly
 
   Returns a list of CRS configurations with resource constraints applied.
+  Each CRS dict includes a 'path' field constructed from registry_parent_dir/crs_name.
+
   Exits with error if:
   - CPU cores conflict (two CRS trying to use same core)
   - CPU cores out of worker range
@@ -206,7 +278,8 @@ def get_crs_for_worker(worker_name: str, resource_config: Dict[str, Any]) -> Lis
 
     result.append({
       'name': crs_name,
-      'cpus': format_cpu_list(crs_cpus_list),
+      'path': str(registry_parent_dir / crs_name),
+      'cpuset': format_cpu_list(crs_cpus_list),
       'memory_limit': format_memory(crs_memory_mb),
       'suffix': 'runner'
     })
@@ -256,6 +329,7 @@ def get_crs_for_worker(worker_name: str, resource_config: Dict[str, Any]) -> Lis
 
       result.append({
         'name': crs_name,
+        'path': str(registry_parent_dir / crs_name),
         'cpuset': format_cpu_list(crs_cpus_list),
         'memory_limit': format_memory(crs_memory),
         'suffix': 'runner'
@@ -264,10 +338,52 @@ def get_crs_for_worker(worker_name: str, resource_config: Dict[str, Any]) -> Lis
   return result
 
 
+def get_project_language(oss_fuzz_path: Path, project: str) -> str:
+  """Get the language for a project from project.yaml."""
+  project_yaml_path = oss_fuzz_path / "projects" / project / "project.yaml"
+
+  if not project_yaml_path.exists():
+    logging.info(f"No project.yaml found for {project}, assuming c++")
+    return "c++"
+
+  import re
+  language_regex = re.compile(r'\s*language\s*:\s*([^\s]+)')
+
+  with open(project_yaml_path) as f:
+    for line in f:
+      match = language_regex.match(line)
+      if match:
+        return match.group(1)
+
+  logging.info(f"Language not specified in project.yaml for {project}, assuming c++")
+  return "c++"
+
+
+def render_litellm_compose(template_path: Path, config_dir: Path,
+                           config_hash: str, crs_list: List[Dict[str, Any]]) -> str:
+  """Render the compose-litellm.yaml template."""
+  if not template_path.exists():
+    raise FileNotFoundError(f"Template file not found: {template_path}")
+
+  template_content = template_path.read_text()
+  template = Template(template_content)
+
+  config_dir_resolved = config_dir.resolve()
+
+  rendered = template.render(
+    config_hash=config_hash,
+    config_dir=str(config_dir_resolved),
+    crs_list=crs_list
+  )
+
+  return rendered
+
+
 def render_compose_for_worker(worker_name: str, crs_list: List[Dict[str, Any]],
                               template_path: Path, oss_fuzz_path: Path,
-                              crs_path: Path, project: str,
-                              fuzzer_command: List[str], config_dir: Path) -> str:
+                              project: str, config_dir: Path, engine: str,
+                              sanitizer: str, architecture: str, mode: str,
+                              config_hash: str, fuzzer_command: List[str] = None) -> str:
   """Render the compose template for a specific worker."""
   if not template_path.exists():
     raise FileNotFoundError(f"Template file not found: {template_path}")
@@ -279,15 +395,23 @@ def render_compose_for_worker(worker_name: str, crs_list: List[Dict[str, Any]],
   config_resource_path = (config_dir / "config-resource.yaml").resolve()
   config_dir_resolved = config_dir.resolve()
 
+  # Get project language
+  project_language = get_project_language(oss_fuzz_path, project)
+
   rendered = template.render(
-    crs_runners=crs_list,
+    crs_list=crs_list,
     worker_name=worker_name,
     oss_fuzz_path=str(oss_fuzz_path),
-    crs_path=str(crs_path),
     project=project,
-    fuzzer_command=fuzzer_command,
+    project_language=project_language,
+    engine=engine,
+    sanitizer=sanitizer,
+    architecture=architecture,
+    fuzzer_command=fuzzer_command or [],
     config_resource_path=str(config_resource_path),
-    config_dir=str(config_dir_resolved)
+    config_dir=str(config_dir_resolved),
+    mode=mode,
+    config_hash=config_hash
   )
 
   return rendered
@@ -295,7 +419,20 @@ def render_compose_for_worker(worker_name: str, crs_list: List[Dict[str, Any]],
 
 def main():
   parser = argparse.ArgumentParser(
-    description='Render Docker Compose files per worker from configuration directory'
+    description='Render Docker Compose files from configuration directory'
+  )
+  parser.add_argument(
+    '--mode',
+    type=str,
+    required=True,
+    choices=['build', 'run'],
+    help='Mode: build (generate compose-build.yaml) or run (generate compose-<worker>.yaml)'
+  )
+  parser.add_argument(
+    '--config-hash',
+    type=str,
+    required=True,
+    help='Hash of config-resource.yaml to prefix network and volume names'
   )
   parser.add_argument(
     '--env-file',
@@ -306,7 +443,7 @@ def main():
     '--output-dir',
     type=str,
     default='.',
-    help='Directory to write compose-<worker>.yaml files (default: current directory)'
+    help='Directory to write compose files (default: current directory)'
   )
   parser.add_argument(
     '--config-dir',
@@ -315,10 +452,10 @@ def main():
     help='Directory containing config-resource.yaml, config-worker.yaml, config-crs.yaml'
   )
   parser.add_argument(
-    '--crs-path',
+    '--registry-parent-dir',
     type=str,
     required=True,
-    help='Path to the CRS directory'
+    help='Directory containing all CRS repositories (each CRS is in a subdirectory named after itself)'
   )
   parser.add_argument(
     '--project',
@@ -327,22 +464,49 @@ def main():
     help='OSS-Fuzz project name'
   )
   parser.add_argument(
+    '--engine',
+    type=str,
+    default='libfuzzer',
+    help='Fuzzing engine (default: libfuzzer)'
+  )
+  parser.add_argument(
+    '--sanitizer',
+    type=str,
+    default='address',
+    help='Sanitizer (default: address)'
+  )
+  parser.add_argument(
+    '--architecture',
+    type=str,
+    default='x86_64',
+    help='Architecture (default: x86_64)'
+  )
+  parser.add_argument(
+    '--worker',
+    type=str,
+    help='Worker name (required in run mode, ignored in build mode)'
+  )
+  parser.add_argument(
     'fuzzer_command',
     nargs=argparse.REMAINDER,
-    help='Fuzzer command and arguments to execute in the container (provide after all other arguments)'
+    help='Fuzzer command and arguments (required in run mode, ignored in build mode)'
   )
 
   args = parser.parse_args()
 
-  # Validate that fuzzer_command is provided
-  if not args.fuzzer_command:
-    parser.error('fuzzer_command is required')
+  # Validate mode-specific requirements
+  if args.mode == 'run':
+    if not args.fuzzer_command:
+      parser.error('fuzzer_command is required in run mode')
+    if not args.worker:
+      parser.error('--worker is required in run mode')
 
   # Convert to Path objects
   config_dir = Path(args.config_dir)
   output_dir = Path(args.output_dir)
   template_path = SCRIPT_DIR / "compose.yaml.j2"
-  crs_path = Path(args.crs_path).resolve()
+  litellm_template_path = SCRIPT_DIR / "compose-litellm.yaml.j2"
+  registry_parent_dir = Path(args.registry_parent_dir).resolve()
 
   # Compute OSS_FUZZ_PATH as parent.parent.parent of this script
   oss_fuzz_path = Path(__file__).parent.parent.parent.resolve()
@@ -360,10 +524,10 @@ def main():
       return 1
     dest_env = output_dir / ".env"
     shutil.copy2(env_file, dest_env)
-    print(f"Copied environment file to: {dest_env}")
+    logging.info(f"Copied environment file to: {dest_env}")
 
   # Load configurations
-  print(f"Loading configuration from: {config_dir}")
+  logging.info(f"Loading configuration from: {config_dir}")
   try:
     config = load_config(config_dir)
   except FileNotFoundError as e:
@@ -377,44 +541,161 @@ def main():
     print("Error: No workers defined in config-resource.yaml")
     return 1
 
-  # Generate compose file for each worker
-  total_crs_count = 0
-  for worker_name in workers.keys():
-    print(f"\nProcessing worker: {worker_name}")
+  # Clone all required CRS repositories
+  crs_configs = resource_config.get('crs', {})
+  for crs_name in crs_configs.keys():
+    logging.info(f"Checking CRS: {crs_name}")
+    if not clone_crs_if_needed(crs_name, registry_parent_dir):
+      print(f"Error: Failed to prepare CRS '{crs_name}'")
+      return 1
 
-    # Get CRS list for this worker
-    crs_list = get_crs_for_worker(worker_name, resource_config)
+  # Check for .env file in config-dir if no explicit env-file was provided
+  if not env_file:
+    config_env_file = config_dir / ".env"
+    if config_env_file.exists():
+      dest_env = output_dir / ".env"
+      shutil.copy2(config_env_file, dest_env)
+      logging.info(f"Copied .env file from config-dir to: {dest_env}")
 
-    if not crs_list:
-      print(f"  No CRS instances configured for worker '{worker_name}', skipping...")
-      continue
+  # Build mode: Generate single compose-build.yaml with all build profiles
+  if args.mode == 'build':
+    logging.info(f"Build mode: generating compose-build.yaml")
 
-    print(f"  Found {len(crs_list)} CRS instance(s):")
-    for crs in crs_list:
-      print(f"    - {crs['name']}: CPUs={crs['cpuset']}, Memory={crs['memory_limit']}")
+    # Collect all CRS instances across all workers
+    all_crs_list = []
+    all_build_profiles = []
 
-    # Render compose file
+    for worker_name in workers.keys():
+      logging.info(f"Processing worker: {worker_name}")
+
+      crs_list = get_crs_for_worker(worker_name, resource_config, registry_parent_dir)
+
+      if not crs_list:
+        logging.info(f"  No CRS instances for worker '{worker_name}'")
+        continue
+
+      logging.info(f"  Found {len(crs_list)} CRS instance(s)")
+      all_crs_list.extend(crs_list)
+      all_build_profiles.extend([f"{crs['name']}_builder" for crs in crs_list])
+
+    # Render compose-litellm.yaml first
     try:
-      rendered = render_compose_for_worker(worker_name, crs_list, template_path,
-                                           oss_fuzz_path, crs_path, args.project,
-                                           args.fuzzer_command, config_dir)
+      litellm_rendered = render_litellm_compose(
+        template_path=litellm_template_path,
+        config_dir=config_dir,
+        config_hash=args.config_hash,
+        crs_list=all_crs_list
+      )
     except FileNotFoundError as e:
       print(f"Error: {e}")
       return 1
 
-    # Write to output file
+    litellm_output_file = output_dir / "compose-litellm.yaml"
+    litellm_output_file.write_text(litellm_rendered)
+    logging.info(f"Written: {litellm_output_file}")
+
+    # Render compose-build.yaml with all CRS instances
+    try:
+      rendered = render_compose_for_worker(
+        worker_name=None,  # Not used in build mode
+        crs_list=all_crs_list,
+        template_path=template_path,
+        oss_fuzz_path=oss_fuzz_path,
+        project=args.project,
+        config_dir=config_dir,
+        engine=args.engine,
+        sanitizer=args.sanitizer,
+        architecture=args.architecture,
+        mode='build',
+        config_hash=args.config_hash,
+        fuzzer_command=None
+      )
+    except FileNotFoundError as e:
+      print(f"Error: {e}")
+      return 1
+
+    # Write to compose-build.yaml
+    output_file = output_dir / "compose-build.yaml"
+    output_file.write_text(rendered)
+    logging.info(f"Written: {output_file}")
+
+    # Print build profiles (comma-separated)
+    print(','.join(all_build_profiles))
+
+    logging.info(f"Summary:")
+    logging.info(f"  Total CRS instances: {len(all_crs_list)}")
+    logging.info(f"  Build profiles: {len(all_build_profiles)}")
+    logging.info(f"  Output: {output_file}")
+
+    return 0
+
+  # Run mode: Generate compose-<worker>.yaml for specific worker
+  elif args.mode == 'run':
+    worker_name = args.worker
+    logging.info(f"Run mode: generating compose-{worker_name}.yaml")
+
+    if worker_name not in workers:
+      print(f"Error: Worker '{worker_name}' not found in config-resource.yaml")
+      return 1
+
+    # Get CRS list for this worker
+    crs_list = get_crs_for_worker(worker_name, resource_config, registry_parent_dir)
+
+    if not crs_list:
+      print(f"Error: No CRS instances configured for worker '{worker_name}'")
+      return 1
+
+    logging.info(f"Found {len(crs_list)} CRS instance(s):")
+    for crs in crs_list:
+      logging.info(f"  - {crs['name']}: CPUs={crs['cpuset']}, Memory={crs['memory_limit']}")
+
+    # Render compose-litellm.yaml first
+    try:
+      litellm_rendered = render_litellm_compose(
+        template_path=litellm_template_path,
+        config_dir=config_dir,
+        config_hash=args.config_hash,
+        crs_list=crs_list
+      )
+    except FileNotFoundError as e:
+      print(f"Error: {e}")
+      return 1
+
+    litellm_output_file = output_dir / "compose-litellm.yaml"
+    litellm_output_file.write_text(litellm_rendered)
+    logging.info(f"Written: {litellm_output_file}")
+
+    # Render compose file
+    try:
+      rendered = render_compose_for_worker(
+        worker_name=worker_name,
+        crs_list=crs_list,
+        template_path=template_path,
+        oss_fuzz_path=oss_fuzz_path,
+        project=args.project,
+        config_dir=config_dir,
+        engine=args.engine,
+        sanitizer=args.sanitizer,
+        architecture=args.architecture,
+        mode='run',
+        config_hash=args.config_hash,
+        fuzzer_command=args.fuzzer_command
+      )
+    except FileNotFoundError as e:
+      print(f"Error: {e}")
+      return 1
+
+    # Write to compose-<worker>.yaml
     output_file = output_dir / f"compose-{worker_name}.yaml"
     output_file.write_text(rendered)
-    print(f"  Written: {output_file}")
+    logging.info(f"Written: {output_file}")
 
-    total_crs_count += len(crs_list)
+    logging.info(f"Summary:")
+    logging.info(f"  Worker: {worker_name}")
+    logging.info(f"  CRS instances: {len(crs_list)}")
+    logging.info(f"  Output: {output_file}")
 
-  print(f"\nSummary:")
-  print(f"  Workers processed: {len(workers)}")
-  print(f"  Total CRS instances: {total_crs_count}")
-  print(f"  Output directory: {output_dir}")
-
-  return 0
+    return 0
 
 
 if __name__ == '__main__':

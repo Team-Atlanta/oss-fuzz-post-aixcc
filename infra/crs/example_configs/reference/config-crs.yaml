@@ -1,4 +1,4 @@
-atlantis-c:
+atlantis-c-libafl:
   models:
     - gpt-4o
     - anthropic/claude-sonnet-4

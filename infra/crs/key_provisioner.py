@@ -198,7 +198,7 @@ def calculate_budgets(config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
   global_llm = resource_config.get('llm', {})
 
   # Get global budget settings
-  global_max_budget = global_llm.get('max_budget', 100)
+  global_max_budget = global_llm.get('max_budget', 0)
   global_max_rpm = global_llm.get('max_rpm')
   global_max_tpm = global_llm.get('max_tpm')
 
@@ -270,7 +270,10 @@ def get_models_list(config: Dict[str, Any], crs_name: str) -> List[str]:
   """
   crs_config = config.get('crs', {})
   crs_specific = crs_config.get(crs_name, {})
-  models = crs_specific.get('models', [])
+  if not crs_specific:
+    models = []
+  else:
+    models = crs_specific.get('models', []) # FIXME the previous get's create None...
   logger.info(f"Using models for {crs_name}: {models}")
   return models
 
@@ -283,6 +286,12 @@ def parse_arguments():
     type=str,
     required=True,
     help='Path to configuration directory'
+  )
+  parser.add_argument(
+    '--crs',
+    type=str,
+    required=True,
+    help='CRS name to provision key for (only one CRS per invocation)'
   )
   parser.add_argument(
     '--duration',
@@ -334,40 +343,45 @@ def main():
     logger.error("LiteLLM proxy service is not ready after maximum retries")
     sys.exit(1)
 
-  # Generate keys for all CRS
-  successful_keys = 0
-  failed_keys = 0
-
-  for crs_name, budget_config in budgets.items():
-    logger.info(f"Generating key for CRS: {crs_name}")
-
-    # Get models list for this specific CRS
-    models = get_models_list(config, crs_name)
-
-    key_data = provisioner.generate_key(
-      user_id=crs_name,
-      max_budget=budget_config['max_budget'],
-      models=models,
-      duration=args.duration,
-      tpm_limit=budget_config['max_tpm'],
-      rpm_limit=budget_config['max_rpm']
-    )
-
-    if key_data:
-      if provisioner.store_key(crs_name, key_data):
-        successful_keys += 1
-        logger.info(f"Successfully provisioned and stored key for CRS {crs_name}")
-      else:
-        failed_keys += 1
-        logger.error(f"Failed to store key for CRS {crs_name}")
-    else:
-      failed_keys += 1
-      logger.error(f"Failed to generate key for CRS {crs_name}")
-
-  logger.info(f"Key provisioning completed: {successful_keys} successful, {failed_keys} failed")
-
-  if failed_keys > 0:
+  # Check if specified CRS exists in budgets
+  if args.crs not in budgets:
+    logger.error(f"CRS '{args.crs}' not found in configuration")
     sys.exit(1)
+
+  # Generate key for specified CRS only
+  crs_name = args.crs
+  budget_config = budgets[crs_name]
+
+  logger.info(f"Generating key for CRS: {crs_name}")
+
+  # Get models list for this specific CRS
+  models = get_models_list(config, crs_name)
+
+  key_data = provisioner.generate_key(
+    user_id=crs_name,
+    max_budget=budget_config['max_budget'],
+    models=models,
+    duration=args.duration,
+    tpm_limit=budget_config['max_tpm'],
+    rpm_limit=budget_config['max_rpm']
+  )
+
+  if key_data:
+    if provisioner.store_key(crs_name, key_data):
+      logger.info(f"Successfully provisioned and stored key for CRS {crs_name}")
+    else:
+      logger.error(f"Failed to store key for CRS {crs_name}")
+      sys.exit(1)
+  else:
+    logger.error(f"Failed to generate key for CRS {crs_name}")
+    sys.exit(1)
+
+  logger.info(f"Key provisioning completed successfully for {crs_name}")
+
+  # Sleep infinitely to keep container running
+  logger.info("Key provisioning complete. Sleeping indefinitely...")
+  while True:
+    time.sleep(3600)  # Sleep for 1 hour at a time
 
 
 if __name__ == "__main__":

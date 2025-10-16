@@ -29,7 +29,7 @@ llm:
 # If a CRS is not listed here, it will get an even share of remaining resources
 crs:
   # Fine-grained configuration example
-  atlantis-c:
+  atlantis-c-libafl:
     # Worker placement - CRS will be deployed to these workers
     workers:
       - local

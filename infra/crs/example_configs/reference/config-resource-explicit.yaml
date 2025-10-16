@@ -16,7 +16,7 @@ llm:
   max_tpm: 1000000
 
 crs:
-  atlantis-c:
+  atlantis-c-libafl:
     workers:
       - server1
     resources:

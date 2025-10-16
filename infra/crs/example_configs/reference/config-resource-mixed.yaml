@@ -20,7 +20,7 @@ llm:
 
 crs:
   # High-priority CRS with explicit allocation
-  atlantis-c:
+  atlantis-c-libafl:
     workers:
       - server1
     resources:

@@ -15,7 +15,7 @@ llm:
 
 # CRS list with minimal config - all resources divided evenly
 crs:
-  atlantis-c:
+  atlantis-c-libafl:
     workers:
       - local
   atlantis-multilang:

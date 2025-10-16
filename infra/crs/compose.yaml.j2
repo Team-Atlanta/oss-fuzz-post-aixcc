@@ -1,108 +1,97 @@
-version: '3.8'
-
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: postgres
-    environment:
-      - POSTGRES_USER=crs
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-    ports: # TODO (for all ports), expose vs bind
-      - "${POSTGRES_PORT}:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - crs_network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U crs -h localhost -p 5432"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+{%- for crs in crs_list %}
 
-  litellm:
-    # TODO pin version
-    image: ghcr.io/berriai/litellm-database:main-stable
-    container_name: litellm_proxy
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - DATABASE_URL=postgresql://crs:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/crs
-    ports:
-      - "4000:4000"
-    volumes:
-      - {{ config_dir }}/config-litellm.yaml:/app/config.yaml:ro
-    networks:
-      - crs_network
-    command: --config /app/config.yaml --detailed_debug
-
-  key_provisioner:
+{%- if mode == 'build' %}
+  # Key Provisioner {{ loop.index }} - {{ crs.name }}
+  {{ crs.name }}_key_provisioner:
+    profiles:
+      - {{ crs.name }}_builder
     build:
       context: {{ oss_fuzz_path }}/infra/crs
       dockerfile: key_provisioner.Dockerfile
-    container_name: key_provisioner
-    depends_on:
-      litellm:
-        condition: service_started
     environment:
-      - LITELLM_URL=http://litellm:4000
+      - LITELLM_URL=http://crs-litellm-{{ config_hash }}-litellm-1:4000
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
     networks:
-      - crs_network
+      - {{ config_hash }}_crs_network
     volumes:
-{%- for crs in crs_runners %}
-      - keys_data_{{ crs.name }}:/keys/{{ crs.name }}
-{%- endfor %}
+      - {{ config_hash }}_keys_data_{{ crs.name }}:/keys/{{ crs.name }}
       - {{ config_dir }}:/config:ro
-    command: ["python", "key_provisioner.py", "--config-dir", "/config"]
+    command: ["python", "key_provisioner.py", "--config-dir", "/config", "--crs", "{{ crs.name }}"]
     # restart: on-failure:5
 
-{%- for crs in crs_runners %}
-
-  # CRS Container {{ loop.index }} - {{ crs.name }}
-  {{ crs.name }}_runner:
-    image: {{ crs.name }}_runner
-    container_name: {{ crs.name }}_{{ crs.suffix | default('runner') }}
+  # CRS Builder {{ loop.index }} - {{ crs.name }}
+  {{ crs.name }}_builder:
+    profiles:
+      - {{ crs.name }}_builder
+    image: {{ project }}_{{ crs.name }}_builder
     depends_on:
-      postgres:
-        condition: service_healthy
-      litellm:
-        condition: service_started
-      key_provisioner:
+      {{ crs.name }}_key_provisioner:
         condition: service_started
     environment:
-      - LITELLM_URL=http://litellm:4000
+      - LITELLM_URL=http://crs-litellm-{{ config_hash }}-litellm-1:4000
+      - FUZZING_ENGINE={{ engine }}
+      - SANITIZER={{ sanitizer }}
+      - ARCHITECTURE={{ architecture }}
+      - PROJECT_NAME={{ project }}
+      - FUZZING_LANGUAGE={{ project_language }}
+      - HELPER=True
+    networks:
+      - {{ config_hash }}_crs_network
+    build:
+      context: {{ crs.path }}
+      dockerfile: builder.Dockerfile
+      additional_contexts:
+        project: {{ oss_fuzz_path }}/projects/{{ project }}
+      args:
+        - CRS_TARGET={{ project }}
+        - PROJECT_PATH={{ oss_fuzz_path }}/projects/{{ project }}
+        - parent_image=gcr.io/oss-fuzz/{{ project }}
+    volumes:
+      - {{ oss_fuzz_path }}/build/out/{{ crs.name }}/{{ project }}:/out
+      - {{ oss_fuzz_path }}/build/work/{{ crs.name }}/{{ project }}:/work
+      - {{ config_hash }}_keys_data_{{ crs.name }}:/keys:ro
+{%- endif %}
+
+{%- if mode == 'run' %}
+  # CRS Runner {{ loop.index }} - {{ crs.name }}
+  {{ crs.name }}_runner:
+    image: {{ crs.name }}_runner
+    environment:
+      - LITELLM_URL=http://crs-litellm-{{ config_hash }}-litellm-1:4000
+      - FUZZING_ENGINE={{ engine }}
+      - SANITIZER={{ sanitizer }}
+      - RUN_FUZZER_MODE=interactive
+      - HELPER=True
       - CPUSET_CPUS={{ crs.cpuset }}
       - MEMORY_LIMIT={{ crs.memory_limit | string }}
     networks:
-      - crs_network
+      - {{ config_hash }}_crs_network
     cpuset: {{ crs.cpuset }}
     build:
-      context: {{ crs_path }}
+      context: {{ crs.path }}
       dockerfile: runner.Dockerfile
       args:
         - PROJECT_PATH={{ oss_fuzz_path }}/projects/{{ project }}
     volumes:
-      # TODO corpus volume?
-      - {{ oss_fuzz_path }}/build/out/{{ project }}:/out
-      - keys_data_{{ crs.name }}:/keys:ro
+      - {{ oss_fuzz_path }}/build/out/{{ crs.name }}/{{ project }}:/out
+      - {{ config_hash }}_keys_data_{{ crs.name }}:/keys:ro
     deploy:
       resources:
         limits:
           memory: {{ crs.memory_limit }}
     command: {{ fuzzer_command | tojson }}
+{%- endif %}
 {%- endfor %}
 
 networks:
-  crs_network:
-    driver: bridge
+  {{ config_hash }}_crs_network:
+    external: true
+    name: {{ config_hash }}_crs_network
 
 volumes:
-  postgres_data:
-    name: postgres_data
-{%- for crs in crs_runners %}
-  keys_data_{{ crs.name }}:
-    name: keys_data_{{ crs.name }}
+{%- for crs in crs_list %}
+  {{ config_hash }}_keys_data_{{ crs.name }}:
+    external: true
+    name: {{ config_hash }}_keys_data_{{ crs.name }}
 {%- endfor %}

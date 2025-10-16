@@ -23,6 +23,7 @@ import argparse
 import datetime
 import errno
 import glob
+import hashlib
 import logging
 import os
 import re
@@ -30,6 +31,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import signal
+import atexit
 import tempfile
 import urllib.request
 
@@ -366,33 +369,17 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
   _add_external_project_args(fuzzbench_build_fuzzers_parser)
   fuzzbench_build_fuzzers_parser.add_argument('project')
   build_crs_parser = subparsers.add_parser(
-      'build_crs', help='Build CRS for a project.')
+      'build_crs', help='Build CRS for a project using docker compose.')
   _add_architecture_args(build_crs_parser)
   _add_engine_args(build_crs_parser)
   _add_sanitizer_args(build_crs_parser)
   _add_environment_args(build_crs_parser)
   _add_external_project_args(build_crs_parser)
-  build_crs_parser.add_argument('crs', help='name of the crs')
   build_crs_parser.add_argument('project')
-  build_crs_parser.add_argument('source_path',
-                                help='path of local source',
-                                nargs='?')
-  build_crs_parser.add_argument('--local',
-                                help='path to local CRS source code')
-  build_crs_parser.add_argument('--mount_path',
-                                dest='mount_path',
-                                help='path to mount local source in '
-                                '(defaults to WORKDIR)')
-  build_crs_parser.add_argument('--clean',
-                                dest='clean',
-                                action='store_true',
-                                help='clean existing artifacts.')
-  build_crs_parser.add_argument('--no-clean',
-                                dest='clean',
-                                action='store_false',
-                                help='do not clean existing artifacts '
-                                '(default).')
-  build_crs_parser.set_defaults(clean=False)
+  build_crs_parser.add_argument('--config-dir',
+                                required=True,
+                                help='directory containing CRS configuration files '
+                                '(config-resource.yaml, config-worker.yaml, config-crs.yaml, .env)')
   check_build_parser = subparsers.add_parser(
       'check_build', help='Checks that fuzzers execute without errors.')
   _add_architecture_args(check_build_parser)
@@ -468,28 +455,27 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
                                         help='name of the fuzzer')
 
   run_crs_parser = subparsers.add_parser(
-    'run_crs', help='Run a CRS in the emulated fuzzing environment.')
+    'run_crs', help='Run CRS using docker compose.')
   _add_architecture_args(run_crs_parser)
   _add_engine_args(run_crs_parser)
   _add_sanitizer_args(run_crs_parser)
   _add_environment_args(run_crs_parser)
   _add_external_project_args(run_crs_parser)
-  run_crs_parser.add_argument('--local',
-                              help='path to local CRS source code')
-  run_crs_parser.add_argument(
-    '--corpus-dir', help='directory to store corpus for the fuzz target')
-  run_crs_parser.add_argument('--config-dir',
-                              help='directory containing CRS configuration files '
-                              '(config-resource.yaml, config-worker.yaml, config-crs.yaml)')
-  run_crs_parser.add_argument('--env-file',
-                              help='path to environment file for compose')
-  run_crs_parser.add_argument('crs', help='name of the crs')
   run_crs_parser.add_argument('project',
                               help='name of the project or path (external)')
   run_crs_parser.add_argument('fuzzer_name', help='name of the fuzzer')
   run_crs_parser.add_argument('fuzzer_args',
                               help='arguments to pass to the fuzzer',
                               nargs='*')
+  run_crs_parser.add_argument('--config-dir',
+                              required=True,
+                              help='directory containing CRS configuration files '
+                              '(config-resource.yaml, config-worker.yaml, config-crs.yaml, .env)')
+  run_crs_parser.add_argument('--worker',
+                              default='local',
+                              help='worker name to run CRS on')
+  run_crs_parser.add_argument('--corpus-dir',
+                              help='directory to store corpus for the fuzz target')
 
   coverage_parser = subparsers.add_parser(
       'coverage', help='Generate code coverage report for the project.')
@@ -690,6 +676,33 @@ def _get_out_dir(project=''):
   """Creates and returns path to /out directory for the given project (if
   specified)."""
   return _get_project_build_subdir(project, 'out')
+
+
+def _get_crs_out_dir(crs_name, project_name):
+  """Creates and returns path to /out directory for a CRS and project.
+
+  Directory structure: build/out/{crs_name}/{project_name}/
+  """
+  return _get_project_build_subdir(os.path.join(crs_name, project_name), 'out')
+
+
+def _get_crs_work_dir(crs_name, project_name):
+  """Creates and returns path to /work directory for a CRS and project.
+
+  Directory structure: build/work/{crs_name}/{project_name}/
+  """
+  return _get_project_build_subdir(os.path.join(crs_name, project_name), 'work')
+
+
+def _get_crs_cache_dir(crs_name):
+  """Creates and returns path to CRS cache directory.
+
+  Directory structure: build/crs_cache/{crs_name}/
+  This is a persistent cache for CRS repositories to avoid re-cloning.
+  """
+  cache_dir = os.path.join(BUILD_DIR, 'crs_cache', crs_name)
+  os.makedirs(cache_dir, exist_ok=True)
+  return cache_dir
 
 
 def _add_architecture_args(parser, choices=None):
@@ -1180,47 +1193,158 @@ def pull_crs(tmp_dir, crs):
   
 
 def build_crs(args):
-  """Builds fuzzers and artifacts for CRS"""
-  with tempfile.TemporaryDirectory() as tmp_dir:
-    if args.local:
-      crs_path = args.local
-    else:
-      if not pull_crs(tmp_dir, args.crs):
+  """Builds fuzzers and artifacts for CRS using docker compose"""
+  if not check_project_exists(args.project):
+    return False
+
+  # Read config-resource.yaml and compute hash
+  config_resource_path = os.path.join(args.config_dir, 'config-resource.yaml')
+  if not os.path.exists(config_resource_path):
+    logger.error('config-resource.yaml not found in config-dir: %s', args.config_dir)
+    return False
+
+  with open(config_resource_path, 'rb') as f:
+    config_content = f.read()
+  config_hash = hashlib.sha256(config_content).hexdigest()[:16]  # Use first 16 chars of hash
+
+  # Create directory under build/crs using the hash
+  crs_build_dir = os.path.join(BUILD_DIR, 'crs', config_hash)
+  os.makedirs(crs_build_dir, exist_ok=True)
+  logger.info('Using CRS build directory: %s', crs_build_dir)
+
+  # Build project image
+  build_image_impl(args.project)
+
+  # Clone oss-crs-registry into the hash directory
+  oss_crs_registry_path = os.path.join(crs_build_dir, 'oss-crs-registry')
+  if not os.path.exists(oss_crs_registry_path):
+    logger.info('Cloning oss-crs-registry to: %s', oss_crs_registry_path)
+    try:
+      subprocess.check_call([
+        'git', 'clone',
+        'git@github.com:Team-Atlanta/oss-crs-registry.git',
+        '--depth', '1',
+        oss_crs_registry_path
+      ])
+    except subprocess.CalledProcessError:
+      logger.error('Failed to clone oss-crs-registry')
+      return False
+  else:
+    logger.info('Using existing oss-crs-registry at: %s', oss_crs_registry_path)
+
+  # Path to render_compose.py
+  render_compose_script = os.path.join(OSS_FUZZ_DIR, 'infra', 'crs', 'render_compose.py')
+
+  # Build command for render_compose.py in build mode
+  # render_compose.py will pull other CRSs as needed based on config-resource.yaml
+  render_cmd = [
+    'python3',
+    render_compose_script,
+    '--mode', 'build',
+    '--config-hash', config_hash,
+    '--config-dir', args.config_dir,
+    '--output-dir', crs_build_dir,
+    '--project', args.project.name,
+    '--engine', args.engine,
+    '--sanitizer', args.sanitizer,
+    '--architecture', args.architecture,
+    '--registry-parent-dir', crs_build_dir,  # Pass where oss-crs-registry was cloned
+  ]
+
+  logger.info('Generating compose-build.yaml: %s', _get_command_string(render_cmd))
+  try:
+    # Capture output to parse comma-separated profiles
+    result = subprocess.run(render_cmd, capture_output=True, text=True, check=True)
+    profiles_output = result.stdout.strip()
+  except subprocess.CalledProcessError as e:
+    logger.error('Failed to generate compose files: %s', e.stderr)
+    return False
+
+  # Parse comma-separated list of build profiles
+  if not profiles_output:
+    logger.error('No build profiles output from render_compose.py')
+    return False
+
+  build_profiles = [p.strip() for p in profiles_output.split(',') if p.strip()]
+  if not build_profiles:
+    logger.error('No build profiles found in output')
+    return False
+
+  logger.info('Found %d build profiles: %s', len(build_profiles), ', '.join(build_profiles))
+
+  # Look for compose files in the hash directory
+  litellm_compose_file = os.path.join(crs_build_dir, 'compose-litellm.yaml')
+  compose_file = os.path.join(crs_build_dir, 'compose-build.yaml')
+
+  if not os.path.exists(litellm_compose_file):
+    logger.error('compose-litellm.yaml was not generated at: %s', litellm_compose_file)
+    return False
+
+  if not os.path.exists(compose_file):
+    logger.error('compose-build.yaml was not generated at: %s', compose_file)
+    return False
+
+  # Project names for separate compose projects
+  litellm_project = f'crs-litellm-{config_hash}'
+  build_project = f'crs-build-{config_hash}'
+
+  # Start LiteLLM services in detached mode as separate project
+  logger.info('Starting LiteLLM services (project: %s)', litellm_project)
+  litellm_up_cmd = ['docker', 'compose', '-p', litellm_project,
+                    '-f', litellm_compose_file, 'up', '-d']
+  try:
+    subprocess.check_call(litellm_up_cmd)
+  except subprocess.CalledProcessError:
+    logger.error('Failed to start LiteLLM services')
+    return False
+
+  # Run docker compose up for each build profile
+  completed_profiles = []
+  try:
+    for profile in build_profiles:
+      logger.info('Building profile: %s', profile)
+      # Only pass the build compose file (litellm is in separate project)
+      compose_cmd = [
+        'docker', 'compose',
+        '-p', build_project,
+        '-f', compose_file,
+        '--profile', profile,
+        'up', '--build', '--abort-on-container-exit'
+      ]
+
+      try:
+        subprocess.check_call(compose_cmd)
+        completed_profiles.append(profile)
+      except subprocess.CalledProcessError:
+        logger.error('Docker compose build failed for profile: %s', profile)
         return False
-      crs_path = os.path.join(tmp_dir, 'crs')
 
-    build_env = [
-      'CRS_TARGET=' + args.project.name,
-      'PROJECT_PATH=' + args.project.path,
-    ]
-    env = [
-      'CRS_TARGET=' + args.project.name,
-    ]
-    if args.e:
-      env += args.e
+      logger.info('Successfully built profile: %s', profile)
 
-    # build image for this CRS
-    tag = f'gcr.io/oss-fuzz/{args.project.name}'
-    build_image_impl(args.project)
-    # build tagged project image
-    assert docker_build([
-      '--tag', tag,
-      '--build-arg', f'parent_image={tag}',
-      '--build-context', f'project={args.project.path}',
-      *_env_to_docker_build_args(build_env),
-      '--file', os.path.join(crs_path, 'builder.Dockerfile'),
-      crs_path
-    ])
+    logger.info('All CRS builds completed successfully')
+  finally:
+    # Clean up: remove all containers from completed profiles
+    logger.info('Cleaning up build services')
+    if completed_profiles:
+      # Build down command with all profiles that were started
+      down_cmd = ['docker', 'compose', '-p', build_project, '-f', compose_file]
+      for profile in completed_profiles:
+        down_cmd.extend(['--profile', profile])
+      down_cmd.extend(['down', '--remove-orphans'])
+      subprocess.run(down_cmd)
+    else:
+      # No profiles completed, just run basic down
+      subprocess.run(['docker', 'compose',
+                      '-p', build_project,
+                      '-f', compose_file,
+                      'down', '--remove-orphans'])
 
-    return build_fuzzers_impl(args.project,
-                              args.clean,
-                              args.engine,
-                              args.sanitizer,
-                              args.architecture,
-                              env,
-                              args.source_path,
-                              mount_path=args.mount_path,
-                              build_project_image=False)
+    # Stop LiteLLM services but keep them for reuse
+    logger.info('Stopping LiteLLM services')
+    subprocess.run(['docker', 'compose', '-p', litellm_project,
+                    '-f', litellm_compose_file, 'stop'])
+
+  return True
   
 
 def _add_oss_fuzz_ci_if_needed(env):
@@ -1710,135 +1834,120 @@ def fuzzbench_run_fuzzer(args):
 
 
 def run_crs(args):
-  """Runs CRS using docker-compose with render_compose.py"""
+  """Runs CRS using docker compose with render_compose.py"""
   if not check_project_exists(args.project):
     return False
 
-  # Check if config-dir is provided for compose mode
-  if args.config_dir:
-    # Use compose generation approach
-    with tempfile.TemporaryDirectory() as tmp_dir:
-      if args.local:
-        crs_path = args.local
-      else:
-        if not pull_crs(tmp_dir, args.crs):
-          return False
-        crs_path = os.path.join(tmp_dir, 'crs')
+  # Read config-resource.yaml and compute hash (same as build_crs)
+  config_resource_path = os.path.join(args.config_dir, 'config-resource.yaml')
+  if not os.path.exists(config_resource_path):
+    logger.error('config-resource.yaml not found in config-dir: %s', args.config_dir)
+    return False
 
-      if not os.path.isdir(crs_path):
-        logger.error(f'CRS {crs_path} does not exist')
-        return False
+  with open(config_resource_path, 'rb') as f:
+    config_content = f.read()
+  config_hash = hashlib.sha256(config_content).hexdigest()[:16]
 
-      # Path to render_compose.py
-      render_compose_script = os.path.join(OSS_FUZZ_DIR, 'infra', 'crs', 'render_compose.py')
+  # Use the same hash directory as build_crs
+  crs_build_dir = os.path.join(BUILD_DIR, 'crs', config_hash)
+  if not os.path.exists(crs_build_dir):
+    logger.error('CRS build directory not found: %s. Please run build_crs first.', crs_build_dir)
+    return False
 
-      # Build command for render_compose.py
-      # FIXME figure out the packaging, and this call is ugly
-      render_cmd = [
-        'python3',
-        render_compose_script,
-        '--config-dir', args.config_dir,
-        '--output-dir', tmp_dir,
-        '--crs-path', crs_path,
-        '--project', args.project.name,
-      ]
+  # Path to render_compose.py
+  render_compose_script = os.path.join(OSS_FUZZ_DIR, 'infra', 'crs', 'render_compose.py')
 
-      if args.env_file:
-        render_cmd.extend(['--env-file', args.env_file])
+  # Build command for render_compose.py in run mode
+  render_cmd = [
+    'python3',
+    render_compose_script,
+    '--mode', 'run',
+    '--config-hash', config_hash,
+    '--config-dir', args.config_dir,
+    '--output-dir', crs_build_dir,
+    '--project', args.project.name,
+    '--engine', args.engine,
+    '--sanitizer', args.sanitizer,
+    '--architecture', args.architecture,
+    '--registry-parent-dir', crs_build_dir,
+    '--worker', args.worker,
+    args.fuzzer_name,
+  ]
+  render_cmd.extend(args.fuzzer_args)
 
-      # Add fuzzer_name and fuzzer_args at the end
-      render_cmd.append(args.fuzzer_name)
-      render_cmd.extend(args.fuzzer_args)
+  logger.info('Generating compose-{}.yaml: {}'.format(args.worker, _get_command_string(render_cmd)))
+  try:
+    subprocess.check_call(render_cmd)
+  except subprocess.CalledProcessError:
+    logger.error('Failed to generate compose file')
+    return False
 
-      logger.info('Generating compose files: %s', _get_command_string(render_cmd))
-      try:
-        subprocess.check_call(render_cmd)
-      except subprocess.CalledProcessError:
-        logger.error('Failed to generate compose files')
-        return False
+  # Look for compose files
+  litellm_compose_file = os.path.join(crs_build_dir, 'compose-litellm.yaml')
+  compose_file = os.path.join(crs_build_dir, f'compose-{args.worker}.yaml')
 
-      # Find generated compose files
-      compose_pattern = os.path.join(tmp_dir, 'compose-*.yaml')
-      compose_files = glob.glob(compose_pattern)
-      if not compose_files:
-        logger.error('No compose files were generated')
-        return False
+  if not os.path.exists(litellm_compose_file):
+    logger.error('compose-litellm.yaml was not generated')
+    return False
 
-      logger.info('Found %d compose file(s)', len(compose_files))
+  if not os.path.exists(compose_file):
+    logger.error('compose-%s.yaml was not generated', args.worker)
+    return False
 
-      # Run docker-compose up for each generated file
-      # TODO: Consider running all compose files together or in parallel
-      for compose_file in compose_files:
-        logger.info('Starting services from: %s', compose_file)
-        compose_cmd = ['docker-compose', '-f', compose_file, 'up', '--abort-on-container-exit']
-        try:
-          subprocess.check_call(compose_cmd)
-        except subprocess.CalledProcessError:
-          logger.error('Docker compose failed for: %s', compose_file)
-          return False
+  # Project names for separate compose projects
+  litellm_project = f'crs-litellm-{config_hash}'
+  run_project = f'crs-run-{config_hash}-{args.worker}'
 
-      return True
+  # Start LiteLLM services in detached mode as separate project
+  logger.info('Starting LiteLLM services (project: %s)', litellm_project)
+  litellm_up_cmd = ['docker', 'compose', '-p', litellm_project,
+                    '-f', litellm_compose_file, 'up', '-d']
+  try:
+    subprocess.check_call(litellm_up_cmd)
+  except subprocess.CalledProcessError:
+    logger.error('Failed to start LiteLLM services')
+    return False
 
-  else:
-    # Original implementation for backward compatibility
-    build_env = [
-      'CRS_TARGET=' + args.project.name,
-    ]
-    env = [
-        'FUZZING_ENGINE=' + args.engine,
-        'SANITIZER=' + args.sanitizer,
-        'RUN_FUZZER_MODE=interactive',
-        'HELPER=True',
-        'CRS_TARGET=' + args.project.name,
-    ]
+  logger.info('Starting runner services from: %s', compose_file)
+  # Commands for cleanup - only affect run project
+  compose_down_cmd = ['docker', 'compose',
+                      '-p', run_project,
+                      '-f', compose_file,
+                      'down', '--remove-orphans']
+  litellm_stop_cmd = ['docker', 'compose', '-p', litellm_project,
+                      '-f', litellm_compose_file, 'stop']
 
-    if args.e:
-      env += args.e
+  def cleanup():
+    """Cleanup function for both compose files"""
+    subprocess.run(compose_down_cmd)
+    subprocess.run(litellm_stop_cmd)
 
-    run_args = _env_to_docker_args(env)
+  def signal_handler(signum, frame):
+    """Handle termination signals"""
+    print(f"\nReceived signal {signum}")
+    cleanup()
+    sys.exit(0)
 
-    if args.corpus_dir:
-      if not os.path.exists(args.corpus_dir):
-        logger.error('The path provided in --corpus-dir argument does not exist')
-        return False
-      corpus_dir = os.path.realpath(args.corpus_dir)
-      run_args.extend([
-          '-v',
-          '{corpus_dir}:/tmp/{fuzzer}_corpus'.format(corpus_dir=corpus_dir,
-                                                     fuzzer=args.fuzzer_name)
-      ])
+  signal.signal(signal.SIGINT, signal_handler)   # Ctrl-C
+  signal.signal(signal.SIGTERM, signal_handler)  # Termination
 
-    # docker run volume mount
-    run_args.extend([
-      '-v',
-      '%s:/out' % args.project.out,
-    ])
+  # Register cleanup on normal exit
+  atexit.register(cleanup)
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-      if args.local:
-        crs_path = args.local
-      else:
-        if not pull_crs(tmp_dir, args.crs):
-          return False
-        crs_path = os.path.join(tmp_dir, 'crs')
-      if not os.path.isdir(crs_path):
-        logger.error(f'CRS {crs_path} does not exist')
-        return False
-      runner_tag = f'{args.crs}_runner'
-      assert docker_build([
-        '--tag', runner_tag,
-        '--file', os.path.join(crs_path, 'runner.Dockerfile'),
-        '--build-context', f'project={args.project.path}',
-        *_env_to_docker_build_args(build_env),
-        crs_path
-      ])
-      # docker run image, fuzzer name and arguments, appended to command
-      run_args.extend([
-        '-t', runner_tag,
-        args.fuzzer_name,
-      ] + args.fuzzer_args)
+  # Only pass the run compose file (litellm is in separate project)
+  compose_cmd = ['docker', 'compose',
+                 '-p', run_project,
+                 '-f', compose_file,
+                 'up', '--abort-on-container-exit']
+  try:
+    subprocess.check_call(compose_cmd)
+  except subprocess.CalledProcessError:
+    logger.error('Docker compose failed for: %s', compose_file)
+    return False
+  finally:
+    cleanup()
 
-      return docker_run(run_args, architecture=args.architecture)
+  return True
   
 
 def fuzzbench_measure(args):
