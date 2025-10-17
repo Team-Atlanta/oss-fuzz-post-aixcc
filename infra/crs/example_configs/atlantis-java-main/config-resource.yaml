@@ -10,7 +10,7 @@
 workers:
   local:
     cpuset: "0-15"  # Taskset CPU list
-    memory: "16G"
+    memory: "64G"
 
 # Global LLM configuration (applies to all CRSs combined)
 # These are TOTAL limits that will be divided among CRSs
