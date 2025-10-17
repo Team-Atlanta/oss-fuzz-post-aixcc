@@ -18,11 +18,13 @@ git clone https://github.com/Team-Atlanta/oss-fuzz-post-aixcc
 
 ### 2. Configure API Key
 
-Set your OpenAI API key as an environment variable. Note that most CRSs in this demo will have minimal quota usage:
+Set your OpenAI API key as an environment variable. The key can be a placeholder value (e.g., `sk-fake-key`), but the variable must be set for the system to run:
 
 ```bash
-export OPENAI_API_KEY=your_api_key_here
+export OPENAI_API_KEY=sk-fake-key
 ```
+
+Note: Most CRSs in this demo have minimal or zero OpenAI API quota usage.
 
 ### 3. Build a CRS
 
