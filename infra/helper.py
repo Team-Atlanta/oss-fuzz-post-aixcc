@@ -1158,7 +1158,7 @@ def build_crs(args):
     try:
       subprocess.check_call([
         'git', 'clone',
-        'git@github.com:Team-Atlanta/oss-crs-registry.git',
+        'https://github.com/Team-Atlanta/oss-crs-registry',
         '--depth', '1',
         oss_crs_registry_path
       ])
