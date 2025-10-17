@@ -56,7 +56,7 @@ python3 infra/helper.py run_crs infra/crs/example_configs/ensemble-java java-exa
 
 - **`atlantis-c-libafl`** - LibAFL-based Atlantis-C for C projects
 - **`crs-libfuzzer`** - Vanilla libFuzzer as a reference CRS implementation
-- **`atlantis-java-main`** - Atlantis-Java with LLM components enabled
+- **`atlantis-java-main`** - Atlantis-Java with LLM components enabled (with LLM)
 - **`atlantis-java-atljazzer`** - Atlantis-Java with fuzzer-only mode (no LLM)
 - **`ensemble-c`** - Ensemble combining `atlantis-c-libafl` and `crs-libfuzzer`
 - **`ensemble-java`** - Ensemble combining `atlantis-java-main` and `atlantis-java-atljazzer`
