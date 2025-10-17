@@ -31,8 +31,10 @@ Note: Most CRSs in this demo have minimal or zero OpenAI API quota usage.
 Choose a configured CRS from `infra/crs/example_configs` and build it:
 
 ```bash
-# Example: Build ensemble-c for the json-c project
+# Example 1: Build ensemble-c for the json-c project
 python3 infra/helper.py build_crs infra/crs/example_configs/ensemble-c json-c
+# Example 2: Build ensemble-java for the java-example project
+python3 infra/helper.py build_crs infra/crs/example_configs/ensemble-java java-example
 ```
 
 Built artifacts will be available under `build/crs` and `build/out`.
@@ -42,7 +44,10 @@ Built artifacts will be available under `build/crs` and `build/out`.
 Execute a built CRS with a specific fuzzer target:
 
 ```bash
+# c
 python3 infra/helper.py run_crs infra/crs/example_configs/ensemble-c json-c json_array_fuzzer
+# java
+python3 infra/helper.py run_crs infra/crs/example_configs/ensemble-java java-example ExampleFuzzer
 ```
 
 **Expected Output**: The CRS will launch successfully with running logs showing CPU core allocation (base numbers 0-15). For ensemble CRSs, CPU cores are evenly distributed among the contained CRSs.
