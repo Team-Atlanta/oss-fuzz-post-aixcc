@@ -24,7 +24,7 @@ services:
   {{ crs.name }}_builder:
     profiles:
       - {{ crs.name }}_builder
-    image: {{ project }}_{{ crs.name }}_builder
+    image: {{ project }}_{{ crs.name }}_builder{% if source_tag %}:{{ source_tag }}{% endif %}
     depends_on:
       {{ crs.name }}_key_provisioner:
         condition: service_started

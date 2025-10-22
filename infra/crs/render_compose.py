@@ -11,6 +11,7 @@ Example usage:
 """
 
 import argparse
+import hashlib
 import logging
 import shutil
 import subprocess
@@ -399,6 +400,11 @@ def render_compose_for_worker(worker_name: str, crs_list: List[Dict[str, Any]],
   # Get project language
   project_language = get_project_language(oss_fuzz_path, project)
 
+  # Compute source_tag from source_path if provided
+  source_tag = None
+  if source_path:
+    source_tag = hashlib.sha256(source_path.encode()).hexdigest()[:12]
+
   rendered = template.render(
     crs_list=crs_list,
     worker_name=worker_name,
@@ -413,7 +419,8 @@ def render_compose_for_worker(worker_name: str, crs_list: List[Dict[str, Any]],
     config_dir=str(config_dir_resolved),
     mode=mode,
     config_hash=config_hash,
-    source_path=source_path
+    source_path=source_path,
+    source_tag=source_tag
   )
 
   return rendered

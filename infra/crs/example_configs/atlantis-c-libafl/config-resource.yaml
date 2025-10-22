@@ -1,10 +1,4 @@
-# Resource Configuration for Multi-Worker CRS Deployment
-#
-# This configuration supports:
-# 1. Multiple workers with per-worker resource specifications
-# 2. Per-CRS resource constraints (fine-grained control)
-# 3. Even resource distribution when CRS-specific configs are omitted
-# 4. Flexible LLM resource allocation (total budget divided among CRSs)
+# Resource Configuration for CRS Deployment
 
 # Worker definitions - specify available resources on each worker
 workers:

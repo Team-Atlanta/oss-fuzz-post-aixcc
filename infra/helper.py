@@ -1191,9 +1191,14 @@ def build_crs(args):
     '--registry-parent-dir', crs_build_dir,  # Pass where oss-crs-registry was cloned
   ]
 
-  # Add source_path if provided
+  # Add source_path if provided and compute source_tag for image versioning
+  source_tag = None
   if args.source_path:
-    render_cmd.extend(['--source-path', _get_absolute_path(args.source_path)])
+    abs_source_path = _get_absolute_path(args.source_path)
+    render_cmd.extend(['--source-path', abs_source_path])
+    # Compute hash of source path for image tagging (same logic as in render_compose.py)
+    source_tag = hashlib.sha256(abs_source_path.encode()).hexdigest()[:12]
+    logger.info('Using source tag for image versioning: %s', source_tag)
 
   logger.info('Generating compose-build.yaml: %s', _get_command_string(render_cmd))
   try:
@@ -1268,8 +1273,10 @@ def build_crs(args):
 
           # Generate unique container name for docker commit
           container_name = f'crs-source-copy-{uuid.uuid4().hex}'
-          # TODO somehow version control with tags, need to regen compose probably
+          # Use tagged image name for version control if source_tag exists
           image_name = f'{args.project.name}_{crs_name}_builder'
+          if source_tag:
+            image_name = f'{image_name}:{source_tag}'
 
           logger.info('Copying source from /local-source-mount to workdir for: %s', service_name)
           copy_cmd = [
