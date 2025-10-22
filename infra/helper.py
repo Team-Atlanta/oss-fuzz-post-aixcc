@@ -35,6 +35,7 @@ import signal
 import atexit
 import tempfile
 import urllib.request
+import uuid
 
 import constants
 import templates
@@ -377,6 +378,9 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
                                 help='directory containing CRS configuration files '
                                 '(config-resource.yaml, config-worker.yaml, config-crs.yaml, .env)')
   build_crs_parser.add_argument('project')
+  build_crs_parser.add_argument('source_path',
+                                help='path of local source',
+                                nargs='?')
   check_build_parser = subparsers.add_parser(
       'check_build', help='Checks that fuzzers execute without errors.')
   _add_architecture_args(check_build_parser)
@@ -1187,6 +1191,10 @@ def build_crs(args):
     '--registry-parent-dir', crs_build_dir,  # Pass where oss-crs-registry was cloned
   ]
 
+  # Add source_path if provided
+  if args.source_path:
+    render_cmd.extend(['--source-path', _get_absolute_path(args.source_path)])
+
   logger.info('Generating compose-build.yaml: %s', _get_command_string(render_cmd))
   try:
     # Capture output to parse comma-separated profiles
@@ -1239,20 +1247,97 @@ def build_crs(args):
   try:
     for profile in build_profiles:
       logger.info('Building profile: %s', profile)
-      # Only pass the build compose file (litellm is in separate project)
-      compose_cmd = [
-        'docker', 'compose',
-        '-p', build_project,
-        '-f', compose_file,
-        '--profile', profile,
-        'up', '--build', '--abort-on-container-exit'
-      ]
 
       try:
-        subprocess.check_call(compose_cmd)
+        # Step 1: Build the containers
+        build_cmd = [
+          'docker', 'compose',
+          '-p', build_project,
+          '-f', compose_file,
+          '--profile', profile,
+          'build'
+        ]
+        logger.info('Building containers for profile: %s', profile)
+        subprocess.check_call(build_cmd)
+
+        # Step 2: If source_path provided, copy source to workdir
+        if args.source_path:
+          # Extract CRS name from profile (format: {crs_name}_builder)
+          crs_name = profile.replace('_builder', '')
+          service_name = f'{crs_name}_builder'
+
+          # Generate unique container name for docker commit
+          container_name = f'crs-source-copy-{uuid.uuid4().hex}'
+          # TODO somehow version control with tags, need to regen compose probably
+          image_name = f'{args.project.name}_{crs_name}_builder'
+
+          logger.info('Copying source from /local-source-mount to workdir for: %s', service_name)
+          copy_cmd = [
+            'docker', 'compose',
+            '-p', build_project,
+            '-f', compose_file,
+            '--profile', profile,
+            'run', '--no-deps', '--name', container_name,
+            service_name,
+            '/bin/bash', '-c',
+            'workdir=$(pwd) && cd / && rm -rf "$workdir" && cp -r /local-source-mount "$workdir"'
+          ]
+          logger.info('Running copy command: %s', _get_command_string(copy_cmd))
+          subprocess.check_call(copy_cmd)
+
+          # Extract original image metadata (CMD and ENTRYPOINT) to preserve them
+          logger.info('Extracting metadata from original image: %s', image_name)
+
+          # Get original CMD
+          cmd_inspect = subprocess.run(
+            ['docker', 'inspect', image_name, '--format', '{{json .Config.Cmd}}'],
+            capture_output=True, text=True, check=True
+          )
+          original_cmd = cmd_inspect.stdout.strip()
+
+          # Get original ENTRYPOINT
+          entrypoint_inspect = subprocess.run(
+            ['docker', 'inspect', image_name, '--format', '{{json .Config.Entrypoint}}'],
+            capture_output=True, text=True, check=True
+          )
+          original_entrypoint = entrypoint_inspect.stdout.strip()
+
+          # Commit the container to preserve source changes in the image
+          # Use --change to restore original CMD and ENTRYPOINT
+          logger.info('Committing container %s to image %s', container_name, image_name)
+          commit_cmd = ['docker', 'commit']
+
+          # Add --change flags to restore original metadata if they exist
+          if original_cmd and original_cmd != 'null':
+            commit_cmd.extend(['--change', f'CMD {original_cmd}'])
+          if original_entrypoint and original_entrypoint != 'null':
+            commit_cmd.extend(['--change', f'ENTRYPOINT {original_entrypoint}'])
+
+          commit_cmd.extend([container_name, image_name])
+          logger.info('Running commit command: %s', _get_command_string(commit_cmd))
+          subprocess.check_call(commit_cmd)
+
+          # Clean up the container
+          logger.info('Removing container: %s', container_name)
+          cleanup_cmd = ['docker', 'rm', container_name]
+          subprocess.check_call(cleanup_cmd)
+
+          logger.info('Successfully copied source and committed to image: %s', image_name)
+
+        # Step 3: Run the build
+        up_cmd = [
+          'docker', 'compose',
+          '-p', build_project,
+          '-f', compose_file,
+          '--profile', profile,
+          'up', '--abort-on-container-exit'
+        ]
+        logger.info('Running build for profile: %s', profile)
+        subprocess.check_call(up_cmd)
+
         completed_profiles.append(profile)
       except subprocess.CalledProcessError:
-        logger.error('Docker compose build failed for profile: %s', profile)
+        logger.error('Docker compose operation failed for profile: %s', profile)
         return False
 
       logger.info('Successfully built profile: %s', profile)
