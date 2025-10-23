@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oss-crs"
+version = "0.1.0"
+description = "OSS-Fuzz Cyber Reasoning System (CRS) build and run tools"
+requires-python = ">=3.8"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Team Atlanta"}
+]
+dependencies = [
+    "requests>=2.31.0",
+    "PyYAML>=6.0.3",
+    "Jinja2>=3.1.6",
+]
+
+[project.scripts]
+oss-crs = "infra.crs.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[tool.setuptools]
+packages = ["infra.crs"]
+package-dir = {"infra.crs" = "."}
+
+[tool.setuptools.package-data]
+"infra.crs" = ["*.j2"]
