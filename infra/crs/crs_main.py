@@ -4,7 +4,6 @@
 import atexit
 import hashlib
 import logging
-import os
 import shlex
 import signal
 import subprocess
@@ -23,7 +22,7 @@ BUILD_DIR = OSS_FUZZ_DIR / 'build'
 
 def _get_absolute_path(path):
     """Returns absolute path with user expansion."""
-    return os.path.abspath(os.path.expanduser(path))
+    return str(Path(path).expanduser().resolve())
 
 
 def _get_command_string(command):
@@ -58,8 +57,8 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
         return False
 
     # Read config-resource.yaml and compute hash
-    config_resource_path = os.path.join(config_dir, 'config-resource.yaml')
-    if not os.path.exists(config_resource_path):
+    config_resource_path = Path(config_dir) / 'config-resource.yaml'
+    if not config_resource_path.exists():
         logger.error('config-resource.yaml not found in config-dir: %s', config_dir)
         return False
 
@@ -68,8 +67,8 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
     config_hash = hashlib.sha256(config_content).hexdigest()[:16]
 
     # Create directory under build/crs using the hash
-    crs_build_dir = os.path.join(build_dir, 'crs', config_hash)
-    os.makedirs(crs_build_dir, exist_ok=True)
+    crs_build_dir = Path(build_dir) / 'crs' / config_hash
+    crs_build_dir.mkdir(parents=True, exist_ok=True)
     logger.info('Using CRS build directory: %s', crs_build_dir)
 
     # Build project image if function provided
@@ -77,15 +76,15 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
         build_image_fn()
 
     # Clone oss-crs-registry into the hash directory
-    oss_crs_registry_path = os.path.join(crs_build_dir, 'oss-crs-registry')
-    if not os.path.exists(oss_crs_registry_path):
+    oss_crs_registry_path = crs_build_dir / 'oss-crs-registry'
+    if not oss_crs_registry_path.exists():
         logger.info('Cloning oss-crs-registry to: %s', oss_crs_registry_path)
         try:
             subprocess.check_call([
                 'git', 'clone',
                 'https://github.com/Team-Atlanta/oss-crs-registry',
                 '--depth', '1',
-                oss_crs_registry_path
+                str(oss_crs_registry_path)
             ])
         except subprocess.CalledProcessError:
             logger.error('Failed to clone oss-crs-registry')
@@ -106,13 +105,13 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
     try:
         build_profiles = render_compose.render_build_compose(
             config_dir=config_dir,
-            output_dir=crs_build_dir,
+            output_dir=str(crs_build_dir),
             config_hash=config_hash,
             project=project_name,
             engine=engine,
             sanitizer=sanitizer,
             architecture=architecture,
-            registry_parent_dir=crs_build_dir,
+            registry_parent_dir=str(crs_build_dir),
             source_path=abs_source_path
         )
     except Exception as e:
@@ -126,14 +125,14 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
     logger.info('Found %d build profiles: %s', len(build_profiles), ', '.join(build_profiles))
 
     # Look for compose files in the hash directory
-    litellm_compose_file = os.path.join(crs_build_dir, 'compose-litellm.yaml')
-    compose_file = os.path.join(crs_build_dir, 'compose-build.yaml')
+    litellm_compose_file = crs_build_dir / 'compose-litellm.yaml'
+    compose_file = crs_build_dir / 'compose-build.yaml'
 
-    if not os.path.exists(litellm_compose_file):
+    if not litellm_compose_file.exists():
         logger.error('compose-litellm.yaml was not generated at: %s', litellm_compose_file)
         return False
 
-    if not os.path.exists(compose_file):
+    if not compose_file.exists():
         logger.error('compose-build.yaml was not generated at: %s', compose_file)
         return False
 
@@ -144,7 +143,7 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
     # Start LiteLLM services in detached mode as separate project
     logger.info('Starting LiteLLM services (project: %s)', litellm_project)
     litellm_up_cmd = ['docker', 'compose', '-p', litellm_project,
-                      '-f', litellm_compose_file, 'up', '-d']
+                      '-f', str(litellm_compose_file), 'up', '-d']
     try:
         subprocess.check_call(litellm_up_cmd)
     except subprocess.CalledProcessError:
@@ -162,7 +161,7 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
                 build_cmd = [
                     'docker', 'compose',
                     '-p', build_project,
-                    '-f', compose_file,
+                    '-f', str(compose_file),
                     '--profile', profile,
                     'build'
                 ]
@@ -186,7 +185,7 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
                     copy_cmd = [
                         'docker', 'compose',
                         '-p', build_project,
-                        '-f', compose_file,
+                        '-f', str(compose_file),
                         '--profile', profile,
                         'run', '--no-deps', '--name', container_name,
                         service_name,
@@ -238,7 +237,7 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
                 up_cmd = [
                     'docker', 'compose',
                     '-p', build_project,
-                    '-f', compose_file,
+                    '-f', str(compose_file),
                     '--profile', profile,
                     'up', '--abort-on-container-exit'
                 ]
@@ -257,7 +256,7 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
         # Clean up: remove all containers from completed profiles
         logger.info('Cleaning up build services')
         if completed_profiles:
-            down_cmd = ['docker', 'compose', '-p', build_project, '-f', compose_file]
+            down_cmd = ['docker', 'compose', '-p', build_project, '-f', str(compose_file)]
             for profile in completed_profiles:
                 down_cmd.extend(['--profile', profile])
             down_cmd.extend(['down', '--remove-orphans'])
@@ -265,13 +264,13 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
         else:
             subprocess.run(['docker', 'compose',
                           '-p', build_project,
-                          '-f', compose_file,
+                          '-f', str(compose_file),
                           'down', '--remove-orphans'])
 
         # Stop LiteLLM services but keep them for reuse
         logger.info('Stopping LiteLLM services')
         subprocess.run(['docker', 'compose', '-p', litellm_project,
-                       '-f', litellm_compose_file, 'stop'])
+                       '-f', str(litellm_compose_file), 'stop'])
 
     return True
 
@@ -304,8 +303,8 @@ def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
         return False
 
     # Read config-resource.yaml and compute hash (same as build_crs)
-    config_resource_path = os.path.join(config_dir, 'config-resource.yaml')
-    if not os.path.exists(config_resource_path):
+    config_resource_path = Path(config_dir) / 'config-resource.yaml'
+    if not config_resource_path.exists():
         logger.error('config-resource.yaml not found in config-dir: %s', config_dir)
         return False
 
@@ -314,8 +313,8 @@ def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
     config_hash = hashlib.sha256(config_content).hexdigest()[:16]
 
     # Use the same hash directory as build_crs
-    crs_build_dir = os.path.join(build_dir, 'crs', config_hash)
-    if not os.path.exists(crs_build_dir):
+    crs_build_dir = Path(build_dir) / 'crs' / config_hash
+    if not crs_build_dir.exists():
         logger.error('CRS build directory not found: %s. Please run build_crs first.', crs_build_dir)
         return False
 
@@ -325,13 +324,13 @@ def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
     try:
         render_compose.render_run_compose(
             config_dir=config_dir,
-            output_dir=crs_build_dir,
+            output_dir=str(crs_build_dir),
             config_hash=config_hash,
             project=project_name,
             engine=engine,
             sanitizer=sanitizer,
             architecture=architecture,
-            registry_parent_dir=crs_build_dir,
+            registry_parent_dir=str(crs_build_dir),
             worker=worker,
             fuzzer_command=fuzzer_command
         )
@@ -340,14 +339,14 @@ def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
         return False
 
     # Look for compose files
-    litellm_compose_file = os.path.join(crs_build_dir, 'compose-litellm.yaml')
-    compose_file = os.path.join(crs_build_dir, f'compose-{worker}.yaml')
+    litellm_compose_file = crs_build_dir / 'compose-litellm.yaml'
+    compose_file = crs_build_dir / f'compose-{worker}.yaml'
 
-    if not os.path.exists(litellm_compose_file):
+    if not litellm_compose_file.exists():
         logger.error('compose-litellm.yaml was not generated')
         return False
 
-    if not os.path.exists(compose_file):
+    if not compose_file.exists():
         logger.error('compose-%s.yaml was not generated', worker)
         return False
 
@@ -358,7 +357,7 @@ def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
     # Start LiteLLM services in detached mode as separate project
     logger.info('Starting LiteLLM services (project: %s)', litellm_project)
     litellm_up_cmd = ['docker', 'compose', '-p', litellm_project,
-                      '-f', litellm_compose_file, 'up', '-d']
+                      '-f', str(litellm_compose_file), 'up', '-d']
     try:
         subprocess.check_call(litellm_up_cmd)
     except subprocess.CalledProcessError:
@@ -369,10 +368,10 @@ def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
     # Commands for cleanup - only affect run project
     compose_down_cmd = ['docker', 'compose',
                        '-p', run_project,
-                       '-f', compose_file,
+                       '-f', str(compose_file),
                        'down', '--remove-orphans']
     litellm_stop_cmd = ['docker', 'compose', '-p', litellm_project,
-                       '-f', litellm_compose_file, 'stop']
+                       '-f', str(litellm_compose_file), 'stop']
 
     def cleanup():
         """Cleanup function for both compose files"""
@@ -394,7 +393,7 @@ def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
     # Only pass the run compose file (litellm is in separate project)
     compose_cmd = ['docker', 'compose',
                   '-p', run_project,
-                  '-f', compose_file,
+                  '-f', str(compose_file),
                   'up', '--abort-on-container-exit']
     try:
         subprocess.check_call(compose_cmd)
