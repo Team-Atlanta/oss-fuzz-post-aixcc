@@ -14,7 +14,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
     parser = argparse.ArgumentParser(
-        description='OSS-Fuzz CRS (Compiler Repair System) build and run tool'
+        description='CRS (Cyber Reasoning System) build and run tool'
     )
     subparsers = parser.add_subparsers(dest='command', help='Command to run')
 
