@@ -21,10 +21,10 @@ def main():
     # build_crs subcommand
     build_parser = subparsers.add_parser('build', help='Build CRS for a project')
     build_parser.add_argument('config_dir',
-                             help='Directory containing CRS configuration files')
+                              help='Directory containing CRS configuration files')
     build_parser.add_argument('project', help='OSS-Fuzz project name')
     build_parser.add_argument('source_path', nargs='?',
-                             help='Optional path to local source')
+                              help='Optional path to local source')
     build_parser.add_argument('--build-dir', default=str(BUILD_DIR),
                               help='Path to build directory')
     build_parser.add_argument('--oss-fuzz-dir', default=str(OSS_FUZZ_DIR),
@@ -32,34 +32,34 @@ def main():
     build_parser.add_argument('--registry-dir',
                               help='Path to local oss-crs-registry directory')
     build_parser.add_argument('--engine', default='libfuzzer',
-                             help='Fuzzing engine (default: libfuzzer)')
+                              help='Fuzzing engine (default: libfuzzer)')
     build_parser.add_argument('--sanitizer', default='address',
-                             help='Sanitizer (default: address)')
+                              help='Sanitizer (default: address)')
     build_parser.add_argument('--architecture', default='x86_64',
-                             help='Architecture (default: x86_64)')
+                              help='Architecture (default: x86_64)')
 
     # run_crs subcommand
     run_parser = subparsers.add_parser('run', help='Run CRS')
     run_parser.add_argument('config_dir',
-                           help='Directory containing CRS configuration files')
+                            help='Directory containing CRS configuration files')
     run_parser.add_argument('project', help='OSS-Fuzz project name')
     run_parser.add_argument('fuzzer_name', help='Name of the fuzzer')
     run_parser.add_argument('fuzzer_args', nargs='*',
-                           help='Arguments to pass to the fuzzer')
+                            help='Arguments to pass to the fuzzer')
     run_parser.add_argument('--worker', default='local',
-                           help='Worker name (default: local)')
+                            help='Worker name (default: local)')
     run_parser.add_argument('--build-dir', default=str(BUILD_DIR),
-                           help='Path to build directory')
+                            help='Path to build directory')
     run_parser.add_argument('--oss-fuzz-dir', default=str(OSS_FUZZ_DIR),
-                           help='Path to oss-fuzz directory')
+                            help='Path to oss-fuzz directory')
     run_parser.add_argument('--registry-dir',
                             help='Path to local oss-crs-registry directory')
     run_parser.add_argument('--engine', default='libfuzzer',
-                           help='Fuzzing engine (default: libfuzzer)')
+                            help='Fuzzing engine (default: libfuzzer)')
     run_parser.add_argument('--sanitizer', default='address',
-                           help='Sanitizer (default: address)')
+                            help='Sanitizer (default: address)')
     run_parser.add_argument('--architecture', default='x86_64',
-                           help='Architecture (default: x86_64)')
+                            help='Architecture (default: x86_64)')
 
     args = parser.parse_args()
 
