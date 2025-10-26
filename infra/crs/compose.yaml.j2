@@ -80,6 +80,9 @@ services:
     volumes:
       - {{ oss_fuzz_path }}/build/out/{{ crs.name }}/{{ project }}:/out
       - {{ config_hash }}_keys_data_{{ crs.name }}:/keys:ro
+{%- if harness_source %}
+      - {{ harness_source }}:/harness-source:ro
+{%- endif %}
     cpuset: {{ crs.cpuset }}
     deploy:
       resources:

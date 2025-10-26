@@ -399,7 +399,7 @@ def render_compose_for_worker(worker_name: str, crs_list: List[Dict[str, Any]],
                               project: str, config_dir: Path, engine: str,
                               sanitizer: str, architecture: str, mode: str,
                               config_hash: str, fuzzer_command: List[str] = None,
-                              source_path: str = None) -> str:
+                              source_path: str = None, harness_source: str = None) -> str:
     """Render the compose template for a specific worker."""
     if not template_path.exists():
         raise FileNotFoundError(f"Template file not found: {template_path}")
@@ -434,7 +434,8 @@ def render_compose_for_worker(worker_name: str, crs_list: List[Dict[str, Any]],
         mode=mode,
         config_hash=config_hash,
         source_path=source_path,
-        source_tag=source_tag
+        source_tag=source_tag,
+        harness_source=harness_source
     )
 
     return rendered
@@ -544,7 +545,8 @@ def render_run_compose(config_dir: str, output_dir: str, config_hash: str,
                        project: str, engine: str, sanitizer: str,
                        architecture: str, crs_build_dir: str,
                        registry_dir: str, worker: str, fuzzer_command: List[str],
-                       source_path: str = None, env_file: str = None) -> None:
+                       source_path: str = None, env_file: str = None,
+                       harness_source: str = None) -> None:
     """
     Programmatic interface for run mode.
     """
@@ -621,7 +623,8 @@ def render_run_compose(config_dir: str, output_dir: str, config_hash: str,
         mode='run',
         config_hash=config_hash,
         fuzzer_command=fuzzer_command,
-        source_path=source_path
+        source_path=source_path,
+        harness_source=harness_source
     )
 
     output_file = output_dir / f"compose-{worker}.yaml"
