@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Main CRS implementation for build and run operations."""
 
+import os
+import subprocess
+import sys
 import atexit
 import hashlib
 import logging
 import shlex
 import signal
-import subprocess
-import sys
 import uuid
 from pathlib import Path
+
+from dotenv import dotenv_values
 
 from . import render_compose
 
@@ -18,7 +21,6 @@ logger = logging.getLogger(__name__)
 # Compute OSS_FUZZ_DIR relative to this file
 OSS_FUZZ_DIR = Path(__file__).parent.parent.parent.resolve()
 BUILD_DIR = OSS_FUZZ_DIR / 'build'
-
 
 def _get_absolute_path(path):
     """Returns absolute path with user expansion."""
@@ -30,11 +32,29 @@ def _get_command_string(command):
     return ' '.join(shlex.quote(part) for part in command)
 
 
+def _verify_external_litellm(config_dir):
+    """Verifies LiteLLM environment variables."""
+    def keys_in_dict(keys, dict_):
+        return all(key in dict_ for key in keys)
+
+    keys = ["LITELLM_URL", "LITELLM_KEY"]
+    if keys_in_dict(keys, os.environ):
+        return True
+
+    dotenv_path = Path(config_dir) / ".env"
+    if dotenv_path.is_file():
+        dotenv_dict = dotenv_values(str(dotenv_path))
+        if keys_in_dict(keys, dotenv_dict):
+            return True
+
+    return False
+
+
 def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
                    engine='libfuzzer', sanitizer='address',
                    architecture='x86_64', source_path=None,
                    build_image_fn=None, check_project_fn=None,
-                   registry_dir=None):
+                   registry_dir=None, external_litellm=False):
     """
     Build CRS for a project using docker compose.
 
@@ -50,14 +70,20 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
         build_image_fn: Optional function to build project image
         check_project_fn: Optional function to check if project exists
         registry_dir: Optional path to local oss-crs-registry directory
+        external_litellm: Use external LiteLLM instance (default: False)
 
     Returns:
         bool: True if successful, False otherwise
     """
-    # Validate project exists if checker provided
+    # Validate project exists if checker provided TODO (don't remove the todo)
     if check_project_fn and not check_project_fn():
         return False
 
+    # Check if litellm keys are provided
+    if external_litellm and not _verify_external_litellm(config_dir):
+        logger.error("LITELLM_URL or LITELLM_KEY is not provided in the environment")
+        return False
+    
     # Read config-resource.yaml and compute hash
     config_resource_path = Path(config_dir) / 'config-resource.yaml'
     if not config_resource_path.exists():
@@ -124,7 +150,8 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
             architecture=architecture,
             crs_build_dir=str(crs_build_dir),
             registry_dir=str(oss_crs_registry_path),
-            source_path=abs_source_path
+            source_path=abs_source_path,
+            external_litellm=external_litellm
         )
     except Exception as e:
         logger.error('Failed to generate compose files: %s', e)
@@ -137,12 +164,7 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
     logger.info('Found %d build profiles: %s', len(build_profiles), ', '.join(build_profiles))
 
     # Look for compose files in the hash directory
-    litellm_compose_file = crs_build_dir / 'compose-litellm.yaml'
     compose_file = crs_build_dir / 'compose-build.yaml'
-
-    if not litellm_compose_file.exists():
-        logger.error('compose-litellm.yaml was not generated at: %s', litellm_compose_file)
-        return False
 
     if not compose_file.exists():
         logger.error('compose-build.yaml was not generated at: %s', compose_file)
@@ -152,15 +174,23 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
     litellm_project = f'crs-litellm-{config_hash}'
     build_project = f'crs-build-{config_hash}'
 
-    # Start LiteLLM services in detached mode as separate project
-    logger.info('Starting LiteLLM services (project: %s)', litellm_project)
-    litellm_up_cmd = ['docker', 'compose', '-p', litellm_project,
-                      '-f', str(litellm_compose_file), 'up', '-d']
-    try:
-        subprocess.check_call(litellm_up_cmd)
-    except subprocess.CalledProcessError:
-        logger.error('Failed to start LiteLLM services')
-        return False
+    # Start LiteLLM services in detached mode as separate project (unless using external)
+    if not external_litellm:
+        litellm_compose_file = crs_build_dir / 'compose-litellm.yaml'
+        if not litellm_compose_file.exists():
+            logger.error('compose-litellm.yaml was not generated at: %s', litellm_compose_file)
+            return False
+
+        logger.info('Starting LiteLLM services (project: %s)', litellm_project)
+        litellm_up_cmd = ['docker', 'compose', '-p', litellm_project,
+                          '-f', str(litellm_compose_file), 'up', '-d']
+        try:
+            subprocess.check_call(litellm_up_cmd)
+        except subprocess.CalledProcessError:
+            logger.error('Failed to start LiteLLM services')
+            return False
+    else:
+        logger.info('Using external LiteLLM instance')
 
     # Run docker compose up for each build profile
     completed_profiles = []
@@ -279,10 +309,11 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
                           '-f', str(compose_file),
                           'down', '--remove-orphans'])
 
-        # Stop LiteLLM services but keep them for reuse
-        logger.info('Stopping LiteLLM services')
-        subprocess.run(['docker', 'compose', '-p', litellm_project,
-                       '-f', str(litellm_compose_file), 'stop'])
+        # Stop LiteLLM services but keep them for reuse (unless using external)
+        if not external_litellm:
+            logger.info('Stopping LiteLLM services')
+            subprocess.run(['docker', 'compose', '-p', litellm_project,
+                           '-f', str(litellm_compose_file), 'stop'])
 
     return True
 
@@ -294,7 +325,8 @@ def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
                  registry_dir=None,
                  output_dir=None,
                  hints_dir=None,
-                 harness_source=None):
+                 harness_source=None,
+                 external_litellm=False):
     """
     Run CRS using docker compose.
 
@@ -314,12 +346,18 @@ def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
         output_dir: Optional output directory for CRS results
         hints_dir: Optional directory containing hints (SARIF and corpus)
         harness_source: Optional path to harness source file (will be mounted to container)
+        external_litellm: Use external LiteLLM instance (default: False)
 
     Returns:
         bool: True if successful, False otherwise
     """
-    # Validate project exists if checker provided
+    # Validate project exists if checker provided TODO (don't remove todo)
     if check_project_fn and not check_project_fn():
+        return False
+
+    # Check if litellm keys are provided
+    if external_litellm and not _verify_external_litellm(config_dir):
+        logger.error("LITELLM_URL or LITELLM_KEY is not provided in the environment")
         return False
 
     # Read config-resource.yaml and compute hash (same as build_crs)
@@ -370,19 +408,15 @@ def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
             registry_dir=str(oss_crs_registry_path),
             worker=worker,
             fuzzer_command=fuzzer_command,
-            harness_source=harness_source
+            harness_source=harness_source,
+            external_litellm=external_litellm
         )
     except Exception as e:
         logger.error('Failed to generate compose file: %s', e)
         return False
 
     # Look for compose files
-    litellm_compose_file = crs_build_dir / 'compose-litellm.yaml'
     compose_file = crs_build_dir / f'compose-{worker}.yaml'
-
-    if not litellm_compose_file.exists():
-        logger.error('compose-litellm.yaml was not generated')
-        return False
 
     if not compose_file.exists():
         logger.error('compose-%s.yaml was not generated', worker)
@@ -392,15 +426,23 @@ def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
     litellm_project = f'crs-litellm-{config_hash}'
     run_project = f'crs-run-{config_hash}-{worker}'
 
-    # Start LiteLLM services in detached mode as separate project
-    logger.info('Starting LiteLLM services (project: %s)', litellm_project)
-    litellm_up_cmd = ['docker', 'compose', '-p', litellm_project,
-                      '-f', str(litellm_compose_file), 'up', '-d']
-    try:
-        subprocess.check_call(litellm_up_cmd)
-    except subprocess.CalledProcessError:
-        logger.error('Failed to start LiteLLM services')
-        return False
+    # Start LiteLLM services in detached mode as separate project (unless using external)
+    if not external_litellm:
+        litellm_compose_file = crs_build_dir / 'compose-litellm.yaml'
+        if not litellm_compose_file.exists():
+            logger.error('compose-litellm.yaml was not generated')
+            return False
+
+        logger.info('Starting LiteLLM services (project: %s)', litellm_project)
+        litellm_up_cmd = ['docker', 'compose', '-p', litellm_project,
+                          '-f', str(litellm_compose_file), 'up', '-d']
+        try:
+            subprocess.check_call(litellm_up_cmd)
+        except subprocess.CalledProcessError:
+            logger.error('Failed to start LiteLLM services')
+            return False
+    else:
+        logger.info('Using external LiteLLM instance')
 
     logger.info('Starting runner services from: %s', compose_file)
     # Commands for cleanup - only affect run project
@@ -408,13 +450,15 @@ def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
                        '-p', run_project,
                        '-f', str(compose_file),
                        'down', '--remove-orphans']
-    litellm_stop_cmd = ['docker', 'compose', '-p', litellm_project,
-                       '-f', str(litellm_compose_file), 'stop']
 
     def cleanup():
-        """Cleanup function for both compose files"""
+        """Cleanup function for compose files"""
         subprocess.run(compose_down_cmd)
-        subprocess.run(litellm_stop_cmd)
+        if not external_litellm:
+            litellm_compose_file = crs_build_dir / 'compose-litellm.yaml'
+            litellm_stop_cmd = ['docker', 'compose', '-p', litellm_project,
+                               '-f', str(litellm_compose_file), 'stop']
+            subprocess.run(litellm_stop_cmd)
 
     def signal_handler(signum, frame):
         """Handle termination signals"""

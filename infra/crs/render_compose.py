@@ -399,7 +399,8 @@ def render_compose_for_worker(worker_name: str, crs_list: List[Dict[str, Any]],
                               project: str, config_dir: Path, engine: str,
                               sanitizer: str, architecture: str, mode: str,
                               config_hash: str, fuzzer_command: List[str] = None,
-                              source_path: str = None, harness_source: str = None) -> str:
+                              source_path: str = None, harness_source: str = None,
+                              external_litellm: bool = False) -> str:
     """Render the compose template for a specific worker."""
     if not template_path.exists():
         raise FileNotFoundError(f"Template file not found: {template_path}")
@@ -435,7 +436,8 @@ def render_compose_for_worker(worker_name: str, crs_list: List[Dict[str, Any]],
         config_hash=config_hash,
         source_path=source_path,
         source_tag=source_tag,
-        harness_source=harness_source
+        harness_source=harness_source,
+        external_litellm=external_litellm
     )
 
     return rendered
@@ -448,7 +450,8 @@ def render_build_compose(config_dir: str, output_dir: str, config_hash: str,
                          project: str, engine: str, sanitizer: str,
                          architecture: str, crs_build_dir: str,
                          registry_dir: str,
-                         source_path: str = None, env_file: str = None) -> List[str]:
+                         source_path: str = None, env_file: str = None,
+                         external_litellm: bool = False) -> List[str]:
     """
     Programmatic interface for build mode.
 
@@ -508,15 +511,16 @@ def render_build_compose(config_dir: str, output_dir: str, config_hash: str,
             all_crs_list.extend(crs_list)
             all_build_profiles.extend([f"{crs['name']}_builder" for crs in crs_list])
 
-    # Render compose-litellm.yaml
-    litellm_rendered = render_litellm_compose(
-        template_path=litellm_template_path,
-        config_dir=config_dir,
-        config_hash=config_hash,
-        crs_list=all_crs_list
-    )
-    litellm_output_file = output_dir / "compose-litellm.yaml"
-    litellm_output_file.write_text(litellm_rendered)
+    # Render compose-litellm.yaml (unless using external LiteLLM)
+    if not external_litellm:
+        litellm_rendered = render_litellm_compose(
+            template_path=litellm_template_path,
+            config_dir=config_dir,
+            config_hash=config_hash,
+            crs_list=all_crs_list
+        )
+        litellm_output_file = output_dir / "compose-litellm.yaml"
+        litellm_output_file.write_text(litellm_rendered)
 
     # Render compose-build.yaml
     rendered = render_compose_for_worker(
@@ -532,7 +536,8 @@ def render_build_compose(config_dir: str, output_dir: str, config_hash: str,
         mode='build',
         config_hash=config_hash,
         fuzzer_command=None,
-        source_path=source_path
+        source_path=source_path,
+        external_litellm=external_litellm
     )
 
     output_file = output_dir / "compose-build.yaml"
@@ -546,7 +551,8 @@ def render_run_compose(config_dir: str, output_dir: str, config_hash: str,
                        architecture: str, crs_build_dir: str,
                        registry_dir: str, worker: str, fuzzer_command: List[str],
                        source_path: str = None, env_file: str = None,
-                       harness_source: str = None) -> None:
+                       harness_source: str = None,
+                       external_litellm: bool = False) -> None:
     """
     Programmatic interface for run mode.
     """
@@ -599,15 +605,16 @@ def render_run_compose(config_dir: str, output_dir: str, config_hash: str,
     if not crs_list:
         raise ValueError(f"No CRS instances configured for worker '{worker}'")
 
-    # Render compose-litellm.yaml
-    litellm_rendered = render_litellm_compose(
-        template_path=litellm_template_path,
-        config_dir=config_dir,
-        config_hash=config_hash,
-        crs_list=crs_list
-    )
-    litellm_output_file = output_dir / "compose-litellm.yaml"
-    litellm_output_file.write_text(litellm_rendered)
+    # Render compose-litellm.yaml (unless using external LiteLLM)
+    if not external_litellm:
+        litellm_rendered = render_litellm_compose(
+            template_path=litellm_template_path,
+            config_dir=config_dir,
+            config_hash=config_hash,
+            crs_list=crs_list
+        )
+        litellm_output_file = output_dir / "compose-litellm.yaml"
+        litellm_output_file.write_text(litellm_rendered)
 
     # Render compose file
     rendered = render_compose_for_worker(
@@ -624,7 +631,8 @@ def render_run_compose(config_dir: str, output_dir: str, config_hash: str,
         config_hash=config_hash,
         fuzzer_command=fuzzer_command,
         source_path=source_path,
-        harness_source=harness_source
+        harness_source=harness_source,
+        external_litellm=external_litellm
     )
 
     output_file = output_dir / f"compose-{worker}.yaml"

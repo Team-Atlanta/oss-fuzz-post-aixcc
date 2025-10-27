@@ -317,7 +317,56 @@ def main():
     logger.error("No CRS configurations found, nothing to provision")
     sys.exit(1)
 
-  # Get configuration from environment variables
+  # Check if using external LiteLLM
+  external_litellm = os.getenv('EXTERNAL_LITELLM', 'false').lower() == 'true'
+
+  if external_litellm:
+    # External LiteLLM mode: use provided key without REST API provisioning
+    logger.info("Using external LiteLLM instance")
+    litellm_key = os.getenv('LITELLM_KEY')
+
+    if not litellm_key:
+      logger.error("LITELLM_KEY environment variable is required for external LiteLLM mode")
+      sys.exit(1)
+
+    # Check if specified CRS exists in budgets
+    if args.crs not in budgets:
+      logger.error(f"CRS '{args.crs}' not found in configuration")
+      sys.exit(1)
+
+    # Store the external key directly
+    crs_name = args.crs
+    logger.info(f"Storing external LiteLLM key for CRS: {crs_name}")
+
+    # Create a simple key_data structure
+    key_data = {
+      'key': litellm_key,
+      'user_id': crs_name,
+      'external': True
+    }
+
+    # Store the key to file
+    keys_dir = Path("/keys") / crs_name
+    if not keys_dir.exists():
+      logger.error(f"Keys directory does not exist: {keys_dir}")
+      sys.exit(1)
+
+    key_file = keys_dir / "api_key"
+    with open(key_file, 'w') as f:
+      f.write(litellm_key)
+
+    metadata_file = keys_dir / "metadata.json"
+    with open(metadata_file, 'w') as f:
+      import json
+      json.dump(key_data, f, indent=2)
+
+    logger.info(f"Successfully stored external key for CRS {crs_name}")
+    logger.info("Key provisioning complete. Sleeping indefinitely...")
+    while True:
+      time.sleep(3600)  # Sleep for 1 hour at a time
+    return
+
+  # Internal LiteLLM mode: provision key via REST API
   litellm_url = os.getenv('LITELLM_URL', 'http://litellm:4000')
   master_key = os.getenv('LITELLM_MASTER_KEY')
 

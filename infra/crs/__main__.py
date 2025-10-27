@@ -37,6 +37,8 @@ def main():
                               help='Sanitizer (default: address)')
     build_parser.add_argument('--architecture', default='x86_64',
                               help='Architecture (default: x86_64)')
+    build_parser.add_argument('--external-litellm', action='store_true',
+                              help='Use external LiteLLM instance (requires LITELLM_URL and LITELLM_KEY env vars)')
 
     # run_crs subcommand
     run_parser = subparsers.add_parser('run', help='Run CRS')
@@ -66,6 +68,8 @@ def main():
                             help='Directory containing hints (SARIF reports and corpus)')
     run_parser.add_argument('--harness-source',
                             help='Path to harness source file for analysis')
+    run_parser.add_argument('--external-litellm', action='store_true',
+                            help='Use external LiteLLM instance (requires LITELLM_URL and LITELLM_KEY env vars)')
 
     args = parser.parse_args()
 
@@ -97,7 +101,8 @@ def main():
             sanitizer=args.sanitizer,
             architecture=args.architecture,
             source_path=args.source_path,
-            registry_dir=args.registry_dir
+            registry_dir=args.registry_dir,
+            external_litellm=args.external_litellm
         )
     elif args.command == 'run':
         result = run_crs_impl(
@@ -114,7 +119,8 @@ def main():
             registry_dir=args.registry_dir,
             output_dir=args.output,
             hints_dir=args.hints,
-            harness_source=args.harness_source
+            harness_source=args.harness_source,
+            external_litellm=args.external_litellm
         )
     else:
         parser.print_help()

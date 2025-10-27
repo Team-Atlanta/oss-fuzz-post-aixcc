@@ -10,10 +10,18 @@ services:
       context: {{ oss_fuzz_path }}/infra/crs
       dockerfile: key_provisioner.Dockerfile
     environment:
+{%- if external_litellm %}
+      - LITELLM_URL=${LITELLM_URL}
+      - LITELLM_KEY=${LITELLM_KEY}
+      - EXTERNAL_LITELLM=true
+{%- else %}
       - LITELLM_URL=http://crs-litellm-{{ config_hash }}-litellm-1:4000
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+{%- endif %}
+{%- if not external_litellm %}
     networks:
       - {{ config_hash }}_crs_network
+{%- endif %}
     volumes:
       - {{ config_hash }}_keys_data_{{ crs.name }}:/keys/{{ crs.name }}
       - {{ config_dir }}:/config:ro
@@ -29,15 +37,21 @@ services:
       {{ crs.name }}_key_provisioner:
         condition: service_started
     environment:
+{%- if external_litellm %}
+      - LITELLM_URL=${LITELLM_URL}
+{%- else %}
       - LITELLM_URL=http://crs-litellm-{{ config_hash }}-litellm-1:4000
+{%- endif %}
       - FUZZING_ENGINE={{ engine }}
       - SANITIZER={{ sanitizer }}
       - ARCHITECTURE={{ architecture }}
       - PROJECT_NAME={{ project }}
       - FUZZING_LANGUAGE={{ project_language }}
       - HELPER=True
+{%- if not external_litellm %}
     networks:
       - {{ config_hash }}_crs_network
+{%- endif %}
     build:
       context: {{ crs.path }}
       dockerfile: builder.Dockerfile
@@ -62,7 +76,11 @@ services:
     image: {{ crs.name }}_runner
     privileged: true
     environment:
+{%- if external_litellm %}
+      - LITELLM_URL=${LITELLM_URL}
+{%- else %}
       - LITELLM_URL=http://crs-litellm-{{ config_hash }}-litellm-1:4000
+{%- endif %}
       - FUZZING_ENGINE={{ engine }}
       - SANITIZER={{ sanitizer }}
       - RUN_FUZZER_MODE=interactive
@@ -70,8 +88,10 @@ services:
       - CPUSET_CPUS={{ crs.cpuset }}
       - MEMORY_LIMIT={{ crs.memory_limit | string }}
       - CRS_TARGET={{ project }}
+{%- if not external_litellm %}
     networks:
       - {{ config_hash }}_crs_network
+{%- endif %}
     build:
       context: {{ crs.path }}
       dockerfile: runner.Dockerfile
@@ -92,11 +112,13 @@ services:
 {%- endif %}
 {%- endfor %}
 
+{%- if not external_litellm %}
 networks:
   {{ config_hash }}_crs_network:
     external: true
     name: {{ config_hash }}_crs_network
 
+{%- endif %}
 volumes:
 {%- for crs in crs_list %}
   {{ config_hash }}_keys_data_{{ crs.name }}:
