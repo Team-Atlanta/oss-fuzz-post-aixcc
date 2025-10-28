@@ -50,7 +50,7 @@ def _verify_external_litellm(config_dir):
     return False
 
 
-def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
+def build_crs(config_dir, project_name, oss_fuzz_dir, build_dir,
                    engine='libfuzzer', sanitizer='address',
                    architecture='x86_64', source_path=None,
                    build_image_fn=None, check_project_fn=None,
@@ -318,7 +318,7 @@ def build_crs_impl(config_dir, project_name, oss_fuzz_dir, build_dir,
     return True
 
 
-def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
+def run_crs(config_dir, project_name, fuzzer_name, fuzzer_args,
                  oss_fuzz_dir, build_dir, worker='local',
                  engine='libfuzzer', sanitizer='address',
                  architecture='x86_64', check_project_fn=None,
@@ -376,7 +376,7 @@ def run_crs_impl(config_dir, project_name, fuzzer_name, fuzzer_args,
         logger.error('CRS build directory not found: %s. Please run build_crs first.', crs_build_dir)
         return False
 
-    # Determine oss-crs-registry location (same logic as build_crs_impl)
+    # Determine oss-crs-registry location (same logic as build_crs)
     if registry_dir:
         # Use provided local registry directory
         oss_crs_registry_path = Path(registry_dir).resolve()

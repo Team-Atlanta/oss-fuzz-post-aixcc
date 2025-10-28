@@ -6,7 +6,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .crs_main import build_crs_impl, run_crs_impl, OSS_FUZZ_DIR, BUILD_DIR
+from .crs_main import build_crs, run_crs, OSS_FUZZ_DIR, BUILD_DIR
 
 
 def main():
@@ -92,7 +92,7 @@ def main():
             return 1
 
     if args.command == 'build':
-        result = build_crs_impl(
+        result = build_crs(
             config_dir=args.config_dir,
             project_name=args.project,
             oss_fuzz_dir=args.oss_fuzz_dir,
@@ -105,7 +105,7 @@ def main():
             external_litellm=args.external_litellm
         )
     elif args.command == 'run':
-        result = run_crs_impl(
+        result = run_crs(
             config_dir=args.config_dir,
             project_name=args.project,
             fuzzer_name=args.fuzzer_name,
